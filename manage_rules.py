@@ -1,7 +1,8 @@
 import pandas as pd
 import os
 
-Vendor = input('Input Vendor: (Ex:Southeast)')
+# Get user input for Vendor
+Vendor = input('Input Vendor: (Ex: Southeast)')
 
 # --- CONFIG ---
 CATALOG_PATH = './Data/Catalog/southeast catalog.xlsx'
@@ -24,13 +25,17 @@ store_map = {
 
 def sync_rules_matrix():
     # 1. Load SKUs and Descriptions from catalog
+    # Note: Using header=1 as per your catalog format
     catalog = pd.read_excel(CATALOG_PATH, header=1, usecols=[
-                            'SKU', 'Description', 'Reporting Category'], dtype={'SKU': str, 'Description': str})
+                            'SKU', 'Description', 'Reporting Category'],
+                            dtype={'SKU': str, 'Description': str})
     catalog = catalog.dropna(subset=['SKU']).drop_duplicates(subset=['SKU'])
 
     # 2. Define the columns we need for every store
-    matrix_columns = ['SKU', 'Description', 'Reporting Category',
-                      'Order_Qty']  # Added Order_Qty here
+    # UPDATED: 'Order In Quantities' replaces 'Order_Qty'
+    matrix_columns = ['SKU', 'Description',
+                      'Reporting Category', 'Order In Quantities']
+
     for code in store_map.values():
         matrix_columns.extend([f'{code}_DNO', f'{code}_Min', f'{code}_Max'])
 
@@ -38,18 +43,24 @@ def sync_rules_matrix():
     if os.path.exists(RULES_MATRIX_PATH):
         rules_df = pd.read_excel(RULES_MATRIX_PATH, dtype={'SKU': str})
 
-        # Refresh descriptions from catalog
-        rules_df = rules_df.drop(columns=['Description'], errors='ignore')
+        # MIGRATION LOGIC: Rename old column if it exists in the Excel file
+        if 'Order_Qty' in rules_df.columns:
+            rules_df = rules_df.rename(
+                columns={'Order_Qty': 'Order In Quantities'})
+
+        # Refresh descriptions/categories from catalog to keep them synced
+        rules_df = rules_df.drop(
+            columns=['Description', 'Reporting Category'], errors='ignore')
         rules_df = pd.merge(
             rules_df, catalog[['SKU', 'Description', 'Reporting Category']], on='SKU', how='left')
 
-        # Ensure Order_Qty exists in existing file, if not, default to 1
-        if 'Order_Qty' not in rules_df.columns:
-            rules_df['Order_Qty'] = 1
+        # Ensure our new column name exists, if not, default to 1
+        if 'Order In Quantities' not in rules_df.columns:
+            rules_df['Order In Quantities'] = 1
     else:
         # Create brand new matrix from catalog
         rules_df = catalog.copy()
-        rules_df['Order_Qty'] = 1  # Initialize all to 1
+        rules_df['Order In Quantities'] = 1  # Initialize all to 1
 
     # 4. Ensure all store columns exist with default values
     for code in store_map.values():
@@ -65,7 +76,7 @@ def sync_rules_matrix():
     new_items = catalog[~catalog['SKU'].isin(existing_skus)].copy()
 
     if not new_items.empty:
-        new_items['Order_Qty'] = 1  # New items default to 1
+        new_items['Order In Quantities'] = 1  # New items default to 1
         for code in store_map.values():
             new_items[f'{code}_DNO'] = False
             new_items[f'{code}_Min'] = 1
