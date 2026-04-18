@@ -25,11 +25,11 @@ store_map = {
 def sync_rules_matrix():
     # 1. Load SKUs and Descriptions from catalog
     catalog = pd.read_excel(CATALOG_PATH, header=1, usecols=[
-                            'SKU', 'Description'], dtype={'SKU': str, 'Description': str})
+                            'SKU', 'Description', 'Reporting Category'], dtype={'SKU': str, 'Description': str})
     catalog = catalog.dropna(subset=['SKU']).drop_duplicates(subset=['SKU'])
 
     # 2. Define the columns we need for every store
-    matrix_columns = ['SKU', 'Description',
+    matrix_columns = ['SKU', 'Description', 'Reporting Category',
                       'Order_Qty']  # Added Order_Qty here
     for code in store_map.values():
         matrix_columns.extend([f'{code}_DNO', f'{code}_Min', f'{code}_Max'])
@@ -41,7 +41,7 @@ def sync_rules_matrix():
         # Refresh descriptions from catalog
         rules_df = rules_df.drop(columns=['Description'], errors='ignore')
         rules_df = pd.merge(
-            rules_df, catalog[['SKU', 'Description']], on='SKU', how='left')
+            rules_df, catalog[['SKU', 'Description', 'Reporting Category']], on='SKU', how='left')
 
         # Ensure Order_Qty exists in existing file, if not, default to 1
         if 'Order_Qty' not in rules_df.columns:
