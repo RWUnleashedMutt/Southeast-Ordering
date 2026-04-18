@@ -59,14 +59,23 @@ if catalog_file and selected_stores:
     df_master = pd.read_excel(catalog_file, header=1)
     df_master.columns = df_master.columns.str.strip()
 
-    # Force SKU and GTIN to strings
-    df_master['SKU'] = df_master['SKU'].astype(str)
+    # Helper function to clean SKU/GTIN from .0 decimals
+    def clean_id(val):
+        if pd.isna(val):
+            return ""
+        # If it's a float like 123.0, convert to int then str
+        if isinstance(val, float) and val.is_integer():
+            return str(int(val))
+        return str(val)
+
+    # Apply the clean ID function
+    df_master['SKU'] = df_master['SKU'].apply(clean_id)
     if 'GTIN' in df_master.columns:
-        df_master['GTIN'] = df_master['GTIN'].astype(str)
+        df_master['GTIN'] = df_master['GTIN'].apply(clean_id)
 
     rules_matrix = pd.read_excel(RULES_FILE_PATH)
     rules_matrix.columns = rules_matrix.columns.str.strip()
-    rules_matrix['SKU'] = rules_matrix['SKU'].astype(str)
+    rules_matrix['SKU'] = rules_matrix['SKU'].apply(clean_id)
 
     st.header(f"Order Processing")
 
@@ -118,12 +127,10 @@ if catalog_file and selected_stores:
                     (raw_order > 0) & (data['HQ_Qty'] > 6), raw_order, 0)
 
                 # 3. Create Summaries
-                # Vendor Order: Include Min/Max, Exclude HQ_Qty
                 order_summary = data[data['Order'] > 0][[
                     'SKU', 'GTIN', 'Description', 'Order', 'Current_Inv', 'Min', 'Max', 'Default Unit Cost'
                 ]].copy().reset_index(drop=True)
 
-                # HQ Transfer: Keep HQ_Qty as it's relevant here
                 hq_transfer_summary = data[data['HQ_Transfer_Qty'] > 0][[
                     'SKU', 'GTIN', 'Description', 'HQ_Transfer_Qty', 'Current_Inv', 'HQ_Qty'
                 ]].copy().reset_index(drop=True)
@@ -204,7 +211,7 @@ elif not selected_stores:
         "Please select at least one store in the sidebar to begin processing.")
 
 else:
-    # --- INSTRUCTIONS DASHBOARD (Shown when no file is uploaded) ---
+    # --- INSTRUCTIONS DASHBOARD ---
     st.info("👋 **Welcome! Please upload the Southeast Catalog to begin.**")
 
     col_inst, col_img = st.columns([1, 1])
