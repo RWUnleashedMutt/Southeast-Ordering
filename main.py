@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import numpy as np
+from datetime import datetime
 
 # --- CONFIG ---
 store_map = {
@@ -18,6 +19,7 @@ store_map = {
     'Current Quantity The Streets at Southpoint': 'SS'
 }
 
+inv_store_map = {v: k for k, v in store_map.items()}
 priority_stores = ['CC', 'CM', 'CVM', 'LB', 'SH']
 
 st.set_page_config(page_title="Inventory & Ordering System", layout="wide")
@@ -26,13 +28,23 @@ st.title("📦 Southeast Inventory & Ordering")
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("1. Upload Files")
-    catalog_file = st.file_uploader("Upload Southeast Catalog", type=['xlsx'])
+    catalog_file = st.file_uploader(
+        "Upload Southeast Catalog (.xlsx)", type=['xlsx'])
 
     st.divider()
 
-    st.header("2. Store Lead Times (Days)")
+    st.header("2. Store Selection")
+    selected_stores = st.multiselect(
+        "Select stores for ordering:",
+        options=list(store_map.values()),
+        default=priority_stores
+    )
+
+    st.divider()
+
+    st.header("3. Store Lead Times (Days)")
     store_lead_times = {}
-    for short_name in store_map.values():
+    for short_name in selected_stores:
         default_val = 1 if short_name in priority_stores else 7
         store_lead_times[short_name] = st.number_input(
             f"Lead Time: {short_name}",
@@ -41,23 +53,40 @@ with st.sidebar:
 
 # --- MAIN APP ---
 RULES_FILE_PATH = './Data/Rules/Southeast Rules Matrix.xlsx'
-if catalog_file:
-    df_master = pd.read_excel(catalog_file, header=1, dtype={
-                              'SKU': str, 'GTIN': str, 'Description': str})
 
-    rules_matrix = pd.read_excel(RULES_FILE_PATH, dtype={
-                                 'SKU': str, 'GTIN': str})
+if catalog_file and selected_stores:
+    # 1. Load and Clean Data
+    df_master = pd.read_excel(catalog_file, header=1)
+    df_master.columns = df_master.columns.str.strip()
 
-    st.header("3. Store Order Sheets")
+    # Force SKU and GTIN to strings
+    df_master['SKU'] = df_master['SKU'].astype(str)
+    if 'GTIN' in df_master.columns:
+        df_master['GTIN'] = df_master['GTIN'].astype(str)
 
-    tabs = st.tabs(list(store_map.values()))
+    rules_matrix = pd.read_excel(RULES_FILE_PATH)
+    rules_matrix.columns = rules_matrix.columns.str.strip()
+    rules_matrix['SKU'] = rules_matrix['SKU'].astype(str)
 
-    for i, (long_name, short_name) in enumerate(store_map.items()):
+    st.header(f"Order Processing")
+
+    hq_col = 'Current Quantity HQ'
+    date_str = datetime.now().strftime("%d-%m-%Y")
+
+    if hq_col not in df_master.columns:
+        st.error(f"❌ Missing column: '{hq_col}' in catalog.")
+        st.stop()
+
+    tabs = st.tabs(selected_stores)
+
+    for i, short_name in enumerate(selected_stores):
+        long_name = inv_store_map[short_name]
+
         with tabs[i]:
             if long_name in df_master.columns:
                 current_lt = store_lead_times[short_name]
 
-                # 1. Prepare Base Data
+                # Prepare Rules
                 lookup_cols = [
                     'SKU', 'Order_Qty', f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
                 valid_lookup = [
@@ -66,84 +95,136 @@ if catalog_file:
                     f'{short_name}_DNO': 'DNO', f'{short_name}_Min': 'Min', f'{short_name}_Max': 'Max'
                 })
 
-                store_inv = df_master[['SKU', 'GTIN', 'Description', 'Default Unit Cost', long_name]].copy(
-                ).rename(columns={long_name: 'Current_Inv'})
-                data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-                data = data.fillna({'DNO': False, 'Order_Qty': 1, 'Min': 0,
-                                   'Max': 0, 'Current_Inv': 0, 'Default Unit Cost': 0})
+                # Merge Data
+                store_inv = df_master[['SKU', 'GTIN', 'Description', 'Default Unit Cost', long_name, hq_col]].copy(
+                ).rename(columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'})
 
-                # 2. Initial Order Calculation
+                data = pd.merge(store_inv, store_rules, on='SKU', how='left')
+                data = data.fillna({'DNO': False, 'Order_Qty': 1, 'Min': 0, 'Max': 0,
+                                   'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0})
+
+                # 2. Logic
                 data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
                 data['Needs_Order'] = (data['Current_Inv'] < data['Effective_Min']) & (
                     data['DNO'] == False)
                 data['Gap_To_Max'] = np.where(
                     data['Needs_Order'], data['Max'] - data['Current_Inv'], 0)
-                data['Order'] = np.ceil(np.maximum(
+                raw_order = np.ceil(np.maximum(
                     data['Gap_To_Max'], 0) / data['Order_Qty']) * data['Order_Qty']
 
-                # 3. Filter for Display
+                # Split Vendor vs HQ
+                data['Order'] = np.where(data['HQ_Qty'] > 6, 0, raw_order)
+                data['HQ_Transfer_Qty'] = np.where(
+                    (raw_order > 0) & (data['HQ_Qty'] > 6), raw_order, 0)
+
+                # 3. Create Summaries
+                # Vendor Order: Include Min/Max, Exclude HQ_Qty
                 order_summary = data[data['Order'] > 0][[
-                    'SKU', 'GTIN', 'Description', 'Order',
-                    'Current_Inv', 'Effective_Min', 'Min', 'Max',
-                    'Default Unit Cost'
-                ]].copy()
+                    'SKU', 'GTIN', 'Description', 'Order', 'Current_Inv', 'Min', 'Max', 'Default Unit Cost'
+                ]].copy().reset_index(drop=True)
 
-               # 4. DATA EDITOR
-                # .reset_index(drop=True) ensures a range index (0, 1, 2...)
-                # This allows hide_index=True to work with num_rows="dynamic"
-                display_df = order_summary.reset_index(drop=True)
+                # HQ Transfer: Keep HQ_Qty as it's relevant here
+                hq_transfer_summary = data[data['HQ_Transfer_Qty'] > 0][[
+                    'SKU', 'GTIN', 'Description', 'HQ_Transfer_Qty', 'Current_Inv', 'HQ_Qty'
+                ]].copy().reset_index(drop=True)
 
-                edited_df = st.data_editor(
-                    display_df,
-                    width="stretch",           # Replaced use_container_width=True
-                    hide_index=True,           # Now works because of reset_index above
-                    num_rows="dynamic",
-                    key=f"editor_{short_name}",
-                    column_config={
-                        "Order": st.column_config.NumberColumn("Order", min_value=0, step=1, required=True),
-                        "Default Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f", disabled=True),
-                        "SKU": st.column_config.TextColumn("SKU"),
-                        "GTIN": st.column_config.TextColumn("GTIN")
-                    }
-                )
+                # --- UI SECTION 1: VENDOR ORDER ---
+                st.subheader(f"🛒 Vendor Order List: {short_name}")
+                if not order_summary.empty:
+                    edited_vendor_df = st.data_editor(
+                        order_summary,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=f"ed_v_{short_name}",
+                        column_config={
+                            "SKU": st.column_config.TextColumn("SKU"),
+                            "GTIN": st.column_config.TextColumn("GTIN"),
+                            "Order": st.column_config.NumberColumn("Order Amount", min_value=0, step=1),
+                            "Min": st.column_config.NumberColumn("Min", disabled=True),
+                            "Max": st.column_config.NumberColumn("Max", disabled=True),
+                            "Current_Inv": st.column_config.NumberColumn("Current Inv", disabled=True),
+                            "Default Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f", disabled=True)
+                        }
+                    )
+                    v_total = (
+                        edited_vendor_df['Order'] * edited_vendor_df['Default Unit Cost']).sum()
+                    st.metric("Vendor Order Cost", f"${v_total:,.2f}")
 
-                # 5. REACTIVE CALCULATION
-                # This ensures that even if 'Order' changed, the cost follows
-                edited_df['Line_Cost'] = edited_df['Order'] * \
-                    edited_df['Default Unit Cost']
+                    buf1 = io.BytesIO()
+                    with pd.ExcelWriter(buf1, engine='xlsxwriter') as writer:
+                        edited_vendor_df.to_excel(
+                            writer, index=False, sheet_name='Vendor_Order')
+                        text_fmt = writer.book.add_format({'num_format': '@'})
+                        writer.sheets['Vendor_Order'].set_column(
+                            'A:B', 18, text_fmt)
 
-                total_cost = edited_df['Line_Cost'].sum()
+                    st.download_button(f"📥 Download Vendor Order ({short_name})", buf1.getvalue(),
+                                       file_name=f"{date_str}_Vendor_Order_{short_name}.xlsx", key=f"dl_v_{short_name}")
+                else:
+                    st.success("No vendor order needed.")
 
-                # Display metrics based on the EDITED data
-                m1, m2 = st.columns(2)
-                m1.metric("Final Order Total", f"${total_cost:,.2f}")
-                m2.info(
-                    "👆 Edit the 'Order' column above; the total will update once you click out of the cell.")
+                st.divider()
 
-                # 6. DOWNLOAD BUTTON
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    # Move Line_Cost to the end for the final file
-                    edited_df.to_excel(writer, index=False,
-                                       sheet_name='Order_Report')
-                    workbook = writer.book
-                    worksheet = writer.sheets['Order_Report']
-                    money_fmt = workbook.add_format(
-                        {'num_format': '$#,##0.00'})
-                    text_fmt = workbook.add_format({'num_format': '@'})
-                    worksheet.set_column('A:B', 15, text_fmt)
-                    worksheet.set_column('C:C', 40)
-                    # Formatting Unit Cost and the new Line Cost
-                    worksheet.set_column('I:J', 14, money_fmt)
+                # --- UI SECTION 2: HQ TRANSFER ---
+                st.subheader(f"🚛 HQ Transfer List: {short_name}")
+                if not hq_transfer_summary.empty:
+                    edited_hq_df = st.data_editor(
+                        hq_transfer_summary,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=f"ed_h_{short_name}",
+                        column_config={
+                            "SKU": st.column_config.TextColumn("SKU"),
+                            "GTIN": st.column_config.TextColumn("GTIN"),
+                            "HQ_Transfer_Qty": st.column_config.NumberColumn("Transfer Amount", min_value=0, step=1),
+                            "HQ_Qty": st.column_config.NumberColumn("Available at HQ", disabled=True)
+                        }
+                    )
+                    st.metric("Total Items to Transfer",
+                              f"{int(edited_hq_df['HQ_Transfer_Qty'].sum())}")
 
-                st.download_button(
-                    label=f"💾 Download Edited {short_name} Order",
-                    data=buffer.getvalue(),
-                    file_name=f"Order_Sheet_{short_name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"dl_btn_{short_name}"
-                )
+                    buf2 = io.BytesIO()
+                    with pd.ExcelWriter(buf2, engine='xlsxwriter') as writer:
+                        edited_hq_df.to_excel(
+                            writer, index=False, sheet_name='HQ_Transfer')
+                        text_fmt = writer.book.add_format({'num_format': '@'})
+                        writer.sheets['HQ_Transfer'].set_column(
+                            'A:B', 18, text_fmt)
+
+                    st.download_button(f"📥 Download HQ Transfer ({short_name})", buf2.getvalue(),
+                                       file_name=f"{date_str}_HQ_Transfer_{short_name}.xlsx", key=f"dl_h_{short_name}")
+                else:
+                    st.info("No items available for transfer from HQ.")
+
             else:
                 st.error(f"Missing column '{long_name}' in Catalog.")
+
+elif not selected_stores:
+    st.warning(
+        "Please select at least one store in the sidebar to begin processing.")
+
 else:
-    st.info("Upload your Catalog and Matrix files in the sidebar.")
+    # --- INSTRUCTIONS DASHBOARD (Shown when no file is uploaded) ---
+    st.info("👋 **Welcome! Please upload the Southeast Catalog to begin.**")
+
+    col_inst, col_img = st.columns([1, 1])
+
+    with col_inst:
+        st.subheader("📋 Step-by-Step Export Instructions")
+        st.markdown("""
+        To ensure accurate data processing, please follow these steps to export your Catalog from Square:
+        
+        1. **Login to Square:** Open the [Square Dashboard](https://app.squareup.com/dashboard).
+        2. **Navigate to Library:** Go to **Items & Services** → **Items** → **Item Library**.
+        3. **Apply Filter:** Click the **Filters** button next to the search bar and set the **Vendor** to **Southeast Pet**.
+        4. **Initiate Export:** Click the **Actions** button in the top-right corner and select **Export Library**.
+        5. **Critical Selection:** In the pop-up window, ensure you select **"Export items matching applied filters"**.
+        6. **Upload:** Once downloaded, upload the `.xlsx` file using the sidebar on the left.
+        """)
+
+    with col_img:
+        st.subheader("📸 Reference Settings")
+        st.image("./Data/Images/Export Example.png", use_container_width=True,
+                 caption="Select the 'Filtered' option as shown above.")
+        st.warning(
+            "⚠️ **Note:** Ensure you export the 'Filtered' list, not the entire library, to prevent processing errors.")
