@@ -59,16 +59,13 @@ if catalog_file and selected_stores:
     df_master = pd.read_excel(catalog_file, header=1)
     df_master.columns = df_master.columns.str.strip()
 
-    # Helper function to clean SKU/GTIN from .0 decimals
     def clean_id(val):
         if pd.isna(val):
             return ""
-        # If it's a float like 123.0, convert to int then str
         if isinstance(val, float) and val.is_integer():
             return str(int(val))
         return str(val)
 
-    # Apply the clean ID function
     df_master['SKU'] = df_master['SKU'].apply(clean_id)
     if 'GTIN' in df_master.columns:
         df_master['GTIN'] = df_master['GTIN'].apply(clean_id)
@@ -135,38 +132,62 @@ if catalog_file and selected_stores:
                     'SKU', 'GTIN', 'Description', 'HQ_Transfer_Qty', 'Current_Inv', 'HQ_Qty'
                 ]].copy().reset_index(drop=True)
 
-                # --- UI SECTION 1: VENDOR ORDER ---
-                st.subheader(f"🛒 Vendor Order List: {short_name}")
+                # --- UI SECTION 1: VENDOR ORDER (DRY vs FROZEN) ---
+                st.subheader(f"🛒 Vendor Orders: {short_name}")
+
                 if not order_summary.empty:
-                    edited_vendor_df = st.data_editor(
-                        order_summary,
-                        use_container_width=True,
-                        hide_index=True,
-                        key=f"ed_v_{short_name}",
-                        column_config={
-                            "SKU": st.column_config.TextColumn("SKU"),
-                            "GTIN": st.column_config.TextColumn("GTIN"),
-                            "Order": st.column_config.NumberColumn("Order Amount", min_value=0, step=1),
-                            "Min": st.column_config.NumberColumn("Min", disabled=True),
-                            "Max": st.column_config.NumberColumn("Max", disabled=True),
-                            "Current_Inv": st.column_config.NumberColumn("Current Inv", disabled=True),
-                            "Default Unit Cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f", disabled=True)
-                        }
-                    )
-                    v_total = (
-                        edited_vendor_df['Order'] * edited_vendor_df['Default Unit Cost']).sum()
-                    st.metric("Vendor Order Cost", f"${v_total:,.2f}")
+                    # Split logic
+                    frozen_mask = order_summary['Description'].str.startswith(
+                        'FRZN', na=False)
+                    dry_df = order_summary[~frozen_mask].reset_index(drop=True)
+                    frozen_df = order_summary[frozen_mask].reset_index(
+                        drop=True)
 
-                    buf1 = io.BytesIO()
-                    with pd.ExcelWriter(buf1, engine='xlsxwriter') as writer:
-                        edited_vendor_df.to_excel(
-                            writer, index=False, sheet_name='Vendor_Order')
-                        text_fmt = writer.book.add_format({'num_format': '@'})
-                        writer.sheets['Vendor_Order'].set_column(
-                            'A:B', 18, text_fmt)
+                    # --- DRY ORDER ---
+                    st.markdown("#### 📦 Dry Order")
+                    if not dry_df.empty:
+                        edited_dry = st.data_editor(
+                            dry_df, use_container_width=True, hide_index=True, key=f"dry_ed_{short_name}")
+                        dry_total = (
+                            edited_dry['Order'] * edited_dry['Default Unit Cost']).sum()
+                        st.metric("Dry Order Cost", f"${dry_total:,.2f}")
 
-                    st.download_button(f"📥 Download Vendor Order ({short_name})", buf1.getvalue(),
-                                       file_name=f"{date_str}_Vendor_Order_{short_name}.xlsx", key=f"dl_v_{short_name}")
+                        buf_dry = io.BytesIO()
+                        with pd.ExcelWriter(buf_dry, engine='xlsxwriter') as writer:
+                            edited_dry.to_excel(
+                                writer, index=False, sheet_name='Dry_Order')
+                            text_fmt = writer.book.add_format(
+                                {'num_format': '@'})
+                            writer.sheets['Dry_Order'].set_column(
+                                'A:B', 18, text_fmt)
+                        st.download_button(f"📥 Download Dry Order ({short_name})", buf_dry.getvalue(),
+                                           file_name=f"{date_str}_Dry_Order_{short_name}.xlsx", key=f"dl_dry_{short_name}")
+                    else:
+                        st.write("No dry items in order.")
+
+                    st.write("")  # Spacer
+
+                    # --- FROZEN ORDER ---
+                    st.markdown("#### ❄️ Frozen Order")
+                    if not frozen_df.empty:
+                        edited_frozen = st.data_editor(
+                            frozen_df, use_container_width=True, hide_index=True, key=f"fz_ed_{short_name}")
+                        fz_total = (
+                            edited_frozen['Order'] * edited_frozen['Default Unit Cost']).sum()
+                        st.metric("Frozen Order Cost", f"${fz_total:,.2f}")
+
+                        buf_fz = io.BytesIO()
+                        with pd.ExcelWriter(buf_fz, engine='xlsxwriter') as writer:
+                            edited_frozen.to_excel(
+                                writer, index=False, sheet_name='Frozen_Order')
+                            text_fmt = writer.book.add_format(
+                                {'num_format': '@'})
+                            writer.sheets['Frozen_Order'].set_column(
+                                'A:B', 18, text_fmt)
+                        st.download_button(f"📥 Download Frozen Order ({short_name})", buf_fz.getvalue(),
+                                           file_name=f"{date_str}_Frozen_Order_{short_name}.xlsx", key=f"dl_fz_{short_name}")
+                    else:
+                        st.write("No frozen items in order.")
                 else:
                     st.success("No vendor order needed.")
 
@@ -176,10 +197,7 @@ if catalog_file and selected_stores:
                 st.subheader(f"🚛 HQ Transfer List: {short_name}")
                 if not hq_transfer_summary.empty:
                     edited_hq_df = st.data_editor(
-                        hq_transfer_summary,
-                        use_container_width=True,
-                        hide_index=True,
-                        key=f"ed_h_{short_name}",
+                        hq_transfer_summary, use_container_width=True, hide_index=True, key=f"ed_h_{short_name}",
                         column_config={
                             "SKU": st.column_config.TextColumn("SKU"),
                             "GTIN": st.column_config.TextColumn("GTIN"),
@@ -213,14 +231,11 @@ elif not selected_stores:
 else:
     # --- INSTRUCTIONS DASHBOARD ---
     st.info("👋 **Welcome! Please upload the Southeast Catalog to begin.**")
-
     col_inst, col_img = st.columns([1, 1])
-
     with col_inst:
         st.subheader("📋 Step-by-Step Export Instructions")
         st.markdown("""
         To ensure accurate data processing, please follow these steps to export your Catalog from Square:
-        
         1. **Login to Square:** Open the [Square Dashboard](https://app.squareup.com/dashboard).
         2. **Navigate to Library:** Go to **Items & Services** → **Items** → **Item Library**.
         3. **Apply Filter:** Click the **Filters** button next to the search bar and set the **Vendor** to **Southeast Pet**.
@@ -228,7 +243,6 @@ else:
         5. **Critical Selection:** In the pop-up window, ensure you select **"Export items matching applied filters"**.
         6. **Upload:** Once downloaded, upload the `.xlsx` file using the sidebar on the left.
         """)
-
     with col_img:
         st.subheader("📸 Reference Settings")
         st.image("./Data/Images/Export Example.png", use_container_width=True,
