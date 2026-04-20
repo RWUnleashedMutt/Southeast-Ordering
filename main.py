@@ -93,8 +93,9 @@ if catalog_file and selected_stores:
                 current_lt = store_lead_times[short_name]
 
                 # Prepare Rules
+                # UPDATED: Changed 'Order_Qty' to 'Order In Quantities'
                 lookup_cols = [
-                    'SKU', 'Order_Qty', f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
+                    'SKU', 'Order In Quantities', f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
                 valid_lookup = [
                     c for c in lookup_cols if c in rules_matrix.columns]
                 store_rules = rules_matrix[valid_lookup].copy().rename(columns={
@@ -106,7 +107,8 @@ if catalog_file and selected_stores:
                 ).rename(columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'})
 
                 data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-                data = data.fillna({'DNO': False, 'Order_Qty': 1, 'Min': 0, 'Max': 0,
+                # UPDATED: fillna key changed to 'Order In Quantities'
+                data = data.fillna({'DNO': False, 'Order In Quantities': 1, 'Min': 0, 'Max': 0,
                                    'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0})
 
                 # 2. Logic
@@ -115,8 +117,10 @@ if catalog_file and selected_stores:
                     data['DNO'] == False)
                 data['Gap_To_Max'] = np.where(
                     data['Needs_Order'], data['Max'] - data['Current_Inv'], 0)
+
+                # UPDATED: calculation now uses 'Order In Quantities'
                 raw_order = np.ceil(np.maximum(
-                    data['Gap_To_Max'], 0) / data['Order_Qty']) * data['Order_Qty']
+                    data['Gap_To_Max'], 0) / data['Order In Quantities']) * data['Order In Quantities']
 
                 # Split Vendor vs HQ
                 data['Order'] = np.where(data['HQ_Qty'] > 6, 0, raw_order)
