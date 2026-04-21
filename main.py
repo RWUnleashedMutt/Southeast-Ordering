@@ -30,41 +30,26 @@ with st.sidebar:
     st.header("1. Upload Files")
     catalog_file = st.file_uploader(
         "Upload Southeast Catalog (.xlsx)", type=['xlsx'])
-
     st.divider()
-
     st.header("2. Store Selection")
-    selected_stores = st.multiselect(
-        "Select stores for ordering:",
-        options=list(store_map.values()),
-        default=priority_stores
-    )
-
+    selected_stores = st.multiselect("Select stores:", options=list(
+        store_map.values()), default=priority_stores)
     st.divider()
-
     st.header("3. Store Lead Times (Days)")
-    store_lead_times = {}
-    for short_name in selected_stores:
-        default_val = 1 if short_name in priority_stores else 7
-        store_lead_times[short_name] = st.number_input(
-            f"Lead Time: {short_name}",
-            min_value=0, max_value=30, value=default_val
-        )
+    store_lead_times = {s: st.number_input(
+        f"Lead Time: {s}", 0, 30, (1 if s in priority_stores else 7)) for s in selected_stores}
 
 # --- MAIN APP ---
 RULES_FILE_PATH = './Data/Rules/Southeast Rules Matrix.xlsx'
 
 if catalog_file and selected_stores:
-    # 1. Load and Clean Data
     df_master = pd.read_excel(catalog_file, header=1)
     df_master.columns = df_master.columns.str.strip()
 
     def clean_id(val):
         if pd.isna(val):
             return ""
-        if isinstance(val, float) and val.is_integer():
-            return str(int(val))
-        return str(val)
+        return str(int(val)) if isinstance(val, float) and val.is_integer() else str(val)
 
     df_master['SKU'] = df_master['SKU'].apply(clean_id)
     if 'GTIN' in df_master.columns:
@@ -74,156 +59,135 @@ if catalog_file and selected_stores:
     rules_matrix.columns = rules_matrix.columns.str.strip()
     rules_matrix['SKU'] = rules_matrix['SKU'].apply(clean_id)
 
-    st.header(f"Order Processing")
-
     hq_col = 'Current Quantity HQ'
     date_str = datetime.now().strftime("%d-%m-%Y")
 
     if hq_col not in df_master.columns:
-        st.error(f"❌ Missing column: '{hq_col}' in catalog.")
+        st.error(f"❌ Missing column: '{hq_col}'")
         st.stop()
 
     tabs = st.tabs(selected_stores)
 
     for i, short_name in enumerate(selected_stores):
         long_name = inv_store_map[short_name]
-
         with tabs[i]:
             if long_name in df_master.columns:
                 current_lt = store_lead_times[short_name]
 
-                # Prepare Rules
-                # UPDATED: Changed 'Order_Qty' to 'Order In Quantities'
-                lookup_cols = [
-                    'SKU', 'Order In Quantities', f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
+                # Rules prep
+                lookup_cols = ['SKU', 'Order In Quantities',
+                               f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
                 valid_lookup = [
                     c for c in lookup_cols if c in rules_matrix.columns]
                 store_rules = rules_matrix[valid_lookup].copy().rename(columns={
                     f'{short_name}_DNO': 'DNO', f'{short_name}_Min': 'Min', f'{short_name}_Max': 'Max'
                 })
 
-                # Merge Data
+                # Merge
                 store_inv = df_master[['SKU', 'GTIN', 'Description', 'Default Unit Cost', long_name, hq_col]].copy(
                 ).rename(columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'})
-
                 data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-                # UPDATED: fillna key changed to 'Order In Quantities'
-                data = data.fillna({'DNO': False, 'Order In Quantities': 1, 'Min': 0, 'Max': 0,
-                                   'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0})
+                data = data.fillna({'DNO': False, 'Order In Quantities': 1, 'Min': 0,
+                                   'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0})
 
-                # 2. Logic
+                # --- CASE PACK & OVER-MAX LOGIC ---
                 data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
                 data['Needs_Order'] = (data['Current_Inv'] < data['Effective_Min']) & (
                     data['DNO'] == False)
-                data['Gap_To_Max'] = np.where(
+                data['Units_Needed_To_Max'] = np.where(
                     data['Needs_Order'], data['Max'] - data['Current_Inv'], 0)
 
-                # UPDATED: calculation now uses 'Order In Quantities'
-                raw_order = np.ceil(np.maximum(
-                    data['Gap_To_Max'], 0) / data['Order In Quantities']) * data['Order In Quantities']
+                # Total Units (Round up to nearest case pack)
+                data['Total_Units'] = np.ceil(np.maximum(
+                    data['Units_Needed_To_Max'], 0) / data['Order In Quantities']) * data['Order In Quantities']
+
+                # Order Cases
+                data['Order_Cases'] = data['Total_Units'] / \
+                    data['Order In Quantities']
 
                 # Split Vendor vs HQ
-                data['Order'] = np.where(data['HQ_Qty'] > 6, 0, raw_order)
+                is_hq_transfer = (data['Total_Units'] > 0) & (
+                    data['HQ_Qty'] > 6)
+                data['Vendor_Units'] = np.where(
+                    is_hq_transfer, 0, data['Total_Units'])
+                data['Vendor_Cases'] = np.where(
+                    is_hq_transfer, 0, data['Order_Cases'])
                 data['HQ_Transfer_Qty'] = np.where(
-                    (raw_order > 0) & (data['HQ_Qty'] > 6), raw_order, 0)
+                    is_hq_transfer, data['Total_Units'], 0)
 
-                # 3. Create Summaries
-                order_summary = data[data['Order'] > 0][[
-                    'SKU', 'GTIN', 'Description', 'Order', 'Current_Inv', 'Min', 'Max', 'Default Unit Cost'
+                # Summary: Vendor
+                order_summary = data[data['Vendor_Units'] > 0][[
+                    'SKU', 'GTIN', 'Description', 'Vendor_Cases', 'Order In Quantities', 'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
                 ]].copy().reset_index(drop=True)
 
+                order_summary.rename(columns={
+                    'Vendor_Cases': 'Order (Cases)',
+                    'Order In Quantities': 'Case Pack',
+                    'Vendor_Units': 'Total Units'
+                }, inplace=True)
+
+                # Summary: HQ
                 hq_transfer_summary = data[data['HQ_Transfer_Qty'] > 0][[
                     'SKU', 'GTIN', 'Description', 'HQ_Transfer_Qty', 'Current_Inv', 'HQ_Qty'
                 ]].copy().reset_index(drop=True)
 
-                # --- UI SECTION 1: VENDOR ORDER (DRY vs FROZEN) ---
+                # --- UI: VENDOR ORDERS ---
                 st.subheader(f"🛒 Vendor Orders: {short_name}")
-
                 if not order_summary.empty:
-                    # Split logic
                     frozen_mask = order_summary['Description'].str.startswith(
                         'FRZN', na=False)
-                    dry_df = order_summary[~frozen_mask].reset_index(drop=True)
-                    frozen_df = order_summary[frozen_mask].reset_index(
-                        drop=True)
+                    for label, df_type in [("📦 Dry Order", order_summary[~frozen_mask]), ("❄️ Frozen Order", order_summary[frozen_mask])]:
+                        st.markdown(f"#### {label}")
+                        if not df_type.empty:
+                            ed_df = st.data_editor(
+                                df_type, use_container_width=True, hide_index=True, num_rows="dynamic", key=f"{label}_{short_name}")
+                            cost = (ed_df['Total Units'] *
+                                    ed_df['Default Unit Cost']).sum()
+                            st.metric(f"{label} Cost", f"${cost:,.2f}")
 
-                    # --- DRY ORDER ---
-                    st.markdown("#### 📦 Dry Order")
-                    if not dry_df.empty:
-                        edited_dry = st.data_editor(
-                            dry_df, use_container_width=True, hide_index=True, key=f"dry_ed_{short_name}")
-                        dry_total = (
-                            edited_dry['Order'] * edited_dry['Default Unit Cost']).sum()
-                        st.metric("Dry Order Cost", f"${dry_total:,.2f}")
+                            # --- CLEAN EXPORT FOR VENDOR ---
+                            # Only gtin, description, and order(cases)
+                            export_df = ed_df[[
+                                'GTIN', 'Description', 'Order (Cases)']].copy()
 
-                        buf_dry = io.BytesIO()
-                        with pd.ExcelWriter(buf_dry, engine='xlsxwriter') as writer:
-                            edited_dry.to_excel(
-                                writer, index=False, sheet_name='Dry_Order')
-                            text_fmt = writer.book.add_format(
-                                {'num_format': '@'})
-                            writer.sheets['Dry_Order'].set_column(
-                                'A:B', 18, text_fmt)
-                        st.download_button(f"📥 Download Dry Order ({short_name})", buf_dry.getvalue(),
-                                           file_name=f"{date_str}_Dry_Order_{short_name}.xlsx", key=f"dl_dry_{short_name}")
-                    else:
-                        st.write("No dry items in order.")
+                            buf = io.BytesIO()
+                            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                                export_df.to_excel(
+                                    writer, index=False, sheet_name='Vendor_Order')
+                                text_fmt = writer.book.add_format(
+                                    {'num_format': '@'})
+                                writer.sheets['Vendor_Order'].set_column(
+                                    'A:A', 20, text_fmt)  # Format GTIN as text
+                                writer.sheets['Vendor_Order'].set_column(
+                                    'B:B', 40)         # Wide Description
 
-                    st.write("")  # Spacer
-
-                    # --- FROZEN ORDER ---
-                    st.markdown("#### ❄️ Frozen Order")
-                    if not frozen_df.empty:
-                        edited_frozen = st.data_editor(
-                            frozen_df, use_container_width=True, hide_index=True, key=f"fz_ed_{short_name}")
-                        fz_total = (
-                            edited_frozen['Order'] * edited_frozen['Default Unit Cost']).sum()
-                        st.metric("Frozen Order Cost", f"${fz_total:,.2f}")
-
-                        buf_fz = io.BytesIO()
-                        with pd.ExcelWriter(buf_fz, engine='xlsxwriter') as writer:
-                            edited_frozen.to_excel(
-                                writer, index=False, sheet_name='Frozen_Order')
-                            text_fmt = writer.book.add_format(
-                                {'num_format': '@'})
-                            writer.sheets['Frozen_Order'].set_column(
-                                'A:B', 18, text_fmt)
-                        st.download_button(f"📥 Download Frozen Order ({short_name})", buf_fz.getvalue(),
-                                           file_name=f"{date_str}_Frozen_Order_{short_name}.xlsx", key=f"dl_fz_{short_name}")
-                    else:
-                        st.write("No frozen items in order.")
+                            st.download_button(f"📥 Download {label}", buf.getvalue(
+                            ), file_name=f"{date_str}_{label}_{short_name}.xlsx", key=f"dl_{label}_{short_name}")
+                        else:
+                            st.write("No items in this category.")
                 else:
                     st.success("No vendor order needed.")
 
+                # --- UI: HQ TRANSFERS ---
                 st.divider()
-
-                # --- UI SECTION 2: HQ TRANSFER ---
                 st.subheader(f"🚛 HQ Transfer List: {short_name}")
                 if not hq_transfer_summary.empty:
-                    edited_hq_df = st.data_editor(
-                        hq_transfer_summary, use_container_width=True, hide_index=True, key=f"ed_h_{short_name}",
-                        column_config={
-                            "SKU": st.column_config.TextColumn("SKU"),
-                            "GTIN": st.column_config.TextColumn("GTIN"),
-                            "HQ_Transfer_Qty": st.column_config.NumberColumn("Transfer Amount", min_value=0, step=1),
-                            "HQ_Qty": st.column_config.NumberColumn("Available at HQ", disabled=True)
-                        }
-                    )
-                    st.metric("Total Items to Transfer",
-                              f"{int(edited_hq_df['HQ_Transfer_Qty'].sum())}")
+                    ed_hq = st.data_editor(hq_transfer_summary, use_container_width=True,
+                                           hide_index=True, num_rows="dynamic", key=f"hq_{short_name}")
+                    st.metric("Total Transfer Units",
+                              f"{int(ed_hq['HQ_Transfer_Qty'].sum())}")
 
-                    buf2 = io.BytesIO()
-                    with pd.ExcelWriter(buf2, engine='xlsxwriter') as writer:
-                        edited_hq_df.to_excel(
-                            writer, index=False, sheet_name='HQ_Transfer')
+                    buf_hq = io.BytesIO()
+                    with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
+                        ed_hq.to_excel(writer, index=False,
+                                       sheet_name='HQ_Transfer')
                         text_fmt = writer.book.add_format({'num_format': '@'})
                         writer.sheets['HQ_Transfer'].set_column(
                             'A:B', 18, text_fmt)
-
-                    st.download_button(f"📥 Download HQ Transfer ({short_name})", buf2.getvalue(),
-                                       file_name=f"{date_str}_HQ_Transfer_{short_name}.xlsx", key=f"dl_h_{short_name}")
+                    st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(
+                    ), file_name=f"{date_str}_HQ_{short_name}.xlsx", key=f"dl_hq_{short_name}")
                 else:
-                    st.info("No items available for transfer from HQ.")
+                    st.info("No items for HQ transfer.")
 
             else:
                 st.error(f"Missing column '{long_name}' in Catalog.")
@@ -240,16 +204,16 @@ else:
         st.subheader("📋 Step-by-Step Export Instructions")
         st.markdown("""
         To ensure accurate data processing, please follow these steps to export your Catalog from Square:
-        1. **Login to Square:** Open the [Square Dashboard](https://app.squareup.com/dashboard).
-        2. **Navigate to Library:** Go to **Items & Services** → **Items** → **Item Library**.
-        3. **Apply Filter:** Click the **Filters** button next to the search bar and set the **Vendor** to **Southeast Pet**.
-        4. **Initiate Export:** Click the **Actions** button in the top-right corner and select **Export Library**.
-        5. **Critical Selection:** In the pop-up window, ensure you select **"Export items matching applied filters"**.
-        6. **Upload:** Once downloaded, upload the `.xlsx` file using the sidebar on the left.
+        1. **Login to Square Dashboard.**
+        2. **Go to Items → Item Library.**
+        3. **Filter by Vendor: Southeast Pet.**
+        4. **Click Actions → Export Library.**
+        5. **Select "Export items matching applied filters".**
+        6. **Upload the file here.**
         """)
     with col_img:
         st.subheader("📸 Reference Settings")
-        st.image("./Data/Images/Export Example.png", use_container_width=True,
-                 caption="Select the 'Filtered' option as shown above.")
+        st.image("./Data/Images/Export Example.png",
+                 use_container_width=True, caption="Select the 'Filtered' option.")
         st.warning(
             "⚠️ **Note:** Ensure you export the 'Filtered' list, not the entire library, to prevent processing errors.")
