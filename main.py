@@ -94,23 +94,38 @@ if catalog_file and selected_stores:
                 data = data.fillna({'DNO': False, 'Order In Quantities': 1, 'Min': 0,
                                    'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0})
 
-                # 2. Logic: Calculate Total Needs
+                # 2. UPDATED LOGIC: Split Trigger Logic (Qty 1 vs Case Packs)
                 data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
-                data['Needs_Order'] = (data['Current_Inv'] < data['Effective_Min']) & (
+
+                # If Qty=1: Order if below Max. If Qty>1: Order if below Min.
+                data['Needs_Order'] = np.where(
+                    data['Order In Quantities'] == 1,
+                    (data['Current_Inv'] < data['Max']),
+                    (data['Current_Inv'] < data['Effective_Min'])
+                )
+
+                # Apply DNO override
+                data['Needs_Order'] = data['Needs_Order'] & (
                     data['DNO'] == False)
+
+                # Calculate the raw gap to fill
                 data['Units_Needed_To_Max'] = np.where(
-                    data['Needs_Order'], data['Max'] - data['Current_Inv'], 0)
+                    data['Needs_Order'],
+                    data['Max'] - data['Current_Inv'],
+                    0
+                )
 
-                # Total Units needed (rounded to case pack)
-                data['Total_Units_Needed'] = np.ceil(np.maximum(
-                    data['Units_Needed_To_Max'], 0) / data['Order In Quantities']) * data['Order In Quantities']
+                # Round up to the nearest case pack
+                data['Total_Units_Needed'] = np.ceil(
+                    np.maximum(data['Units_Needed_To_Max'], 0) /
+                    data['Order In Quantities']
+                ) * data['Order In Quantities']
 
-                # 3. HQ TRANSFER UI (Processed first)
+                # 3. HQ TRANSFER UI
                 st.subheader(f"🚛 HQ Transfer List: {short_name}")
                 st.caption(
                     "Items with HQ Stock > 6 are suggested here. Delete a row or set Qty to 0 to move it to the Vendor Order.")
 
-                # Create initial HQ suggestion
                 data['Suggested_HQ_Qty'] = np.where((data['Total_Units_Needed'] > 0) & (
                     data['HQ_Qty'] > 6), data['Total_Units_Needed'], 0)
 
@@ -119,16 +134,12 @@ if catalog_file and selected_stores:
                 hq_display.rename(
                     columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
 
-                # The Interactive Editor
                 ed_hq = st.data_editor(hq_display, use_container_width=True,
                                        hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
 
                 # 4. CALCULATE VENDOR REMAINDER
-                # Get the final user-approved HQ numbers
                 hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
 
-                # Logic: Vendor gets (Total Needed) minus (What is coming from HQ)
-                # If SKU was deleted from HQ editor, .get() returns 0, pushing all units to Vendor.
                 data['Final_HQ_Qty'] = data['SKU'].map(
                     lambda x: hq_final_map.get(x, 0))
                 data['Vendor_Units'] = (
@@ -136,7 +147,6 @@ if catalog_file and selected_stores:
                 data['Vendor_Cases'] = data['Vendor_Units'] / \
                     data['Order In Quantities']
 
-                # HQ Download Button
                 if not ed_hq.empty:
                     st.metric("Total Transfer Units",
                               f"{int(ed_hq['Transfer_Qty'].sum())}")
@@ -171,7 +181,6 @@ if catalog_file and selected_stores:
                                     ed_df['Default Unit Cost']).sum()
                             st.metric(f"{label} Cost", f"${cost:,.2f}")
 
-                            # Clean Export
                             export_df = ed_df[[
                                 'GTIN', 'Description', 'Order (Cases)']].copy()
                             buf = io.BytesIO()
@@ -214,7 +223,6 @@ else:
         """)
     with col_img:
         st.subheader("📸 Reference Settings")
-        # Ensure this path is correct relative to where you run the script
         try:
             st.image("./Data/Images/Export Example.png",
                      use_container_width=True, caption="Select the 'Filtered' option.")
