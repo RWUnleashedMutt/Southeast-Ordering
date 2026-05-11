@@ -1,5 +1,7 @@
 streamlit
 pandas
+numpy
+gspread
+google-auth
 openpyxl
 xlsxwriter
-numpy

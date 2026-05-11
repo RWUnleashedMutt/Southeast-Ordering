@@ -3,8 +3,23 @@ import pandas as pd
 import io
 import numpy as np
 from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- CONFIG ---
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+
+SHEET_IDS = {
+    'All Vendors': '1iX-LpiavNqcyZqe1r068DmziafQbsDuugmdszqS89Tw',
+    'Bradley Caldwell': '1eqENDXTdDJVKdos-VUXYNYMNM806rNcDrv63Q654nyc',
+    'Fluff & Tuff': '1nGWM9Lt34e3vpqaETjPeMVsCTKVC9kIEQ3VVx1mEUqY',
+    'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ'
+    # Add a line for each vendor
+}
+
 store_map = {
     'Current Quantity City Market: DTR': 'CM',
     'Current Quantity Crabtree Valley Mall': 'CVM',
@@ -22,6 +37,50 @@ store_map = {
 inv_store_map = {v: k for k, v in store_map.items()}
 priority_stores = ['CC', 'CM', 'CVM', 'LB', 'SH']
 
+
+# --- HELPERS ---
+def clean_id(val):
+    if pd.isna(val):
+        return ""
+    return str(int(val)) if isinstance(val, float) and val.is_integer() else str(val)
+
+
+@st.cache_data
+def load_catalog(file) -> pd.DataFrame:
+    df = pd.read_excel(file, header=1)
+    df.columns = df.columns.str.strip()
+    df['SKU'] = df['SKU'].apply(clean_id)
+    if 'GTIN' in df.columns:
+        df['GTIN'] = df['GTIN'].apply(clean_id)
+    return df
+
+
+@st.cache_resource
+def get_google_client():
+    """Authenticate using Streamlit secrets — works both locally and on Streamlit Cloud."""
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES
+    )
+    return gspread.authorize(creds)
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
+    """Pull the rules matrix for the given vendor from Google Sheets."""
+    if vendor not in SHEET_IDS:
+        raise ValueError(f"No Sheet ID configured for vendor '{vendor}'.")
+    client = get_google_client()
+    spreadsheet = client.open_by_key(SHEET_IDS[vendor])
+    worksheet = spreadsheet.sheet1
+    data = worksheet.get_all_records(value_render_option='UNFORMATTED_VALUE')
+    df = pd.DataFrame(data)
+    df.columns = df.columns.str.strip()
+    df['SKU'] = df['SKU'].apply(clean_id)
+    return df
+
+
+# --- APP ---
 st.set_page_config(page_title="Inventory & Ordering System", layout="wide")
 st.title("📦 Southeast Inventory & Ordering")
 
@@ -30,46 +89,67 @@ with st.sidebar:
     st.header("1. Upload Files")
     catalog_file = st.file_uploader(
         "Upload Southeast Catalog (.xlsx)", type=['xlsx'])
+
     st.divider()
-    st.header("2. Store Selection")
-    selected_stores = st.multiselect("Select stores:", options=list(
-        store_map.values()), default=priority_stores)
+    st.header("2. Vendor")
+    selected_vendor = st.selectbox(
+        "Select vendor to load rules from Google Sheets:",
+        options=["-- Select a Vendor --"] + list(SHEET_IDS.keys())
+    )
+
+    load_rules_btn = st.button("📥 Load Rules from Google Sheets")
+
     st.divider()
-    st.header("3. Store Lead Times (Days)")
-    store_lead_times = {s: st.number_input(
-        f"Lead Time: {s}", 0, 30, (1 if s in priority_stores else 7)) for s in selected_stores}
+    st.header("3. Store Selection")
+    selected_stores = st.multiselect(
+        "Select stores:", options=list(store_map.values()), default=priority_stores
+    )
+
+    st.divider()
+    st.header("4. Store Lead Times (Days)")
+    store_lead_times = {
+        s: st.number_input(
+            f"Lead Time: {s}", 0, 30, (1 if s in priority_stores else 7))
+        for s in selected_stores
+    }
+
+# --- LOAD RULES FROM SHEETS ---
+rules_matrix = None
+
+if selected_vendor == "-- Select a Vendor --":
+    st.sidebar.info("Please select a vendor to load rules.")
+elif load_rules_btn:
+    with st.spinner(f"Loading rules matrix for **{selected_vendor}** from Google Sheets..."):
+        try:
+            rules_matrix = load_rules_from_sheets(selected_vendor)
+            st.session_state["rules_matrix"] = rules_matrix
+            st.session_state["rules_vendor"] = selected_vendor
+            st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
+        except Exception as e:
+            st.sidebar.error(f"❌ Failed to load rules: {e}")
+elif "rules_matrix" in st.session_state and st.session_state.get("rules_vendor") == selected_vendor:
+    # Keep the already-loaded matrix if vendor hasn't changed
+    rules_matrix = st.session_state["rules_matrix"]
+    st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
 
 # --- MAIN APP ---
-RULES_FILE_PATH = './Data/Rules/Southeast Rules Matrix.xlsx'
+if catalog_file and rules_matrix is not None and selected_stores:
+    df_master = load_catalog(catalog_file)
 
-if catalog_file and selected_stores:
-    df_master = pd.read_excel(catalog_file, header=1)
-    df_master.columns = df_master.columns.str.strip()
-
-    def clean_id(val):
-        if pd.isna(val):
-            return ""
-        return str(int(val)) if isinstance(val, float) and val.is_integer() else str(val)
-
-    df_master['SKU'] = df_master['SKU'].apply(clean_id)
-    if 'GTIN' in df_master.columns:
-        df_master['GTIN'] = df_master['GTIN'].apply(clean_id)
-
-    # Load rules
-    try:
-        rules_matrix = pd.read_excel(RULES_FILE_PATH)
-        rules_matrix.columns = rules_matrix.columns.str.strip()
-        rules_matrix['SKU'] = rules_matrix['SKU'].apply(clean_id)
-    except Exception as e:
-        st.error(f"Could not find Rules Matrix at {RULES_FILE_PATH}")
-        st.stop()
+    # Filter rules to only SKUs present in the catalog
+    catalog_skus = set(df_master['SKU'].unique())
+    rules_matrix = rules_matrix[rules_matrix['SKU'].isin(catalog_skus)].copy()
 
     hq_col = 'Current Quantity HQ'
-    date_str = datetime.now().strftime("%d-%m-%Y")
+    date_str = datetime.now().strftime("%Y-%m-%d")
 
     if hq_col not in df_master.columns:
         st.error(f"❌ Missing column: '{hq_col}'")
         st.stop()
+
+    matched = len(rules_matrix['SKU'].unique())
+    total = len(catalog_skus)
+    st.caption(f"✅ Matched {matched} of {total} catalog SKUs to rules.")
 
     tabs = st.tabs(selected_stores)
 
@@ -85,61 +165,59 @@ if catalog_file and selected_stores:
                 valid_lookup = [
                     c for c in lookup_cols if c in rules_matrix.columns]
                 store_rules = rules_matrix[valid_lookup].copy().rename(columns={
-                    f'{short_name}_DNO': 'DNO', f'{short_name}_Min': 'Min', f'{short_name}_Max': 'Max'
+                    f'{short_name}_DNO': 'DNO',
+                    f'{short_name}_Min': 'Min',
+                    f'{short_name}_Max': 'Max'
                 })
 
-                store_inv = df_master[['SKU', 'GTIN', 'Description', 'Default Unit Cost', long_name, hq_col]].copy(
-                ).rename(columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'})
+                store_inv = df_master[[
+                    'SKU', 'GTIN', 'Item Name', 'Default Unit Cost', long_name, hq_col
+                ]].copy().rename(columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'})
+
                 data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-                data = data.fillna({'DNO': False, 'Order In Quantities': 1, 'Min': 0,
-                                   'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0})
+                data = data.fillna({
+                    'DNO': False, 'Order In Quantities': 1, 'Min': 0,
+                    'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
+                })
 
-                # 2. UPDATED LOGIC: Split Trigger Logic (Qty 1 vs Case Packs)
+                # 2. Split Trigger Logic
                 data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
-
-                # If Qty=1: Order if below Max. If Qty>1: Order if below Min.
                 data['Needs_Order'] = np.where(
                     data['Order In Quantities'] == 1,
                     (data['Current_Inv'] < data['Max']),
                     (data['Current_Inv'] < data['Effective_Min'])
                 )
-
-                # Apply DNO override
                 data['Needs_Order'] = data['Needs_Order'] & (
                     data['DNO'] == False)
-
-                # Calculate the raw gap to fill
                 data['Units_Needed_To_Max'] = np.where(
-                    data['Needs_Order'],
-                    data['Max'] - data['Current_Inv'],
-                    0
+                    data['Needs_Order'], data['Max'] - data['Current_Inv'], 0
                 )
-
-                # Round up to the nearest case pack
                 data['Total_Units_Needed'] = np.ceil(
                     np.maximum(data['Units_Needed_To_Max'], 0) /
                     data['Order In Quantities']
                 ) * data['Order In Quantities']
 
-                # 3. HQ TRANSFER UI
+                # 3. HQ Transfer UI
                 st.subheader(f"🚛 HQ Transfer List: {short_name}")
                 st.caption(
                     "Items with HQ Stock > 6 are suggested here. Delete a row or set Qty to 0 to move it to the Vendor Order.")
 
-                data['Suggested_HQ_Qty'] = np.where((data['Total_Units_Needed'] > 0) & (
-                    data['HQ_Qty'] > 6), data['Total_Units_Needed'], 0)
+                data['Suggested_HQ_Qty'] = np.where(
+                    (data['Total_Units_Needed'] > 0) & (data['HQ_Qty'] > 6),
+                    data['Total_Units_Needed'], 0
+                )
 
                 hq_display = data[data['Suggested_HQ_Qty'] > 0][[
-                    'SKU', 'GTIN', 'Description', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty']].copy()
+                    'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty'
+                ]].copy()
                 hq_display.rename(
                     columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
 
                 ed_hq = st.data_editor(hq_display, use_container_width=True,
                                        hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
 
-                # 4. CALCULATE VENDOR REMAINDER
+                # 4. Vendor Remainder
                 hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
-
                 data['Final_HQ_Qty'] = data['SKU'].map(
                     lambda x: hq_final_map.get(x, 0))
                 data['Vendor_Units'] = (
@@ -154,35 +232,43 @@ if catalog_file and selected_stores:
                     with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
                         ed_hq.to_excel(writer, index=False,
                                        sheet_name='HQ_Transfer')
-                    st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(
-                    ), file_name=f"{date_str}_HQ_{short_name}.xlsx", key=f"dl_hq_{short_name}")
+                    st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
+                                       file_name=f"{date_str}_HQ_{short_name}.xlsx",
+                                       key=f"dl_hq_{short_name}")
 
                 st.divider()
 
-                # 5. VENDOR ORDER UI
+                # 5. Vendor Order UI
                 st.subheader(f"🛒 Vendor Orders: {short_name}")
                 order_summary = data[data['Vendor_Units'] > 0][[
-                    'SKU', 'GTIN', 'Description', 'Vendor_Cases', 'Order In Quantities', 'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
+                    'SKU', 'GTIN', 'Item Name', 'Vendor_Cases', 'Order In Quantities',
+                    'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
                 ]].copy().reset_index(drop=True)
-
                 order_summary.rename(columns={
-                                     'Vendor_Cases': 'Order (Cases)', 'Order In Quantities': 'Case Pack', 'Vendor_Units': 'Total Units'}, inplace=True)
+                    'Vendor_Cases': 'Order (Cases)',
+                    'Order In Quantities': 'Case Pack',
+                    'Vendor_Units': 'Total Units'
+                }, inplace=True)
 
                 if not order_summary.empty:
-                    frozen_mask = order_summary['Description'].str.startswith(
+                    frozen_mask = order_summary['Item Name'].str.startswith(
                         'FRZN', na=False)
 
-                    for label, df_type in [("📦 Dry Order", order_summary[~frozen_mask]), ("❄️ Frozen Order", order_summary[frozen_mask])]:
+                    for label, df_type in [
+                        ("📦 Dry Order", order_summary[~frozen_mask]),
+                        ("❄️ Frozen Order", order_summary[frozen_mask])
+                    ]:
                         st.markdown(f"#### {label}")
                         if not df_type.empty:
-                            ed_df = st.data_editor(
-                                df_type, use_container_width=True, hide_index=True, num_rows="dynamic", key=f"vend_{label}_{short_name}")
+                            ed_df = st.data_editor(df_type, use_container_width=True,
+                                                   hide_index=True, num_rows="dynamic",
+                                                   key=f"vend_{label}_{short_name}")
                             cost = (ed_df['Total Units'] *
                                     ed_df['Default Unit Cost']).sum()
                             st.metric(f"{label} Cost", f"${cost:,.2f}")
 
                             export_df = ed_df[[
-                                'GTIN', 'Description', 'Order (Cases)']].copy()
+                                'GTIN', 'Item Name', 'Order (Cases)']].copy()
                             buf = io.BytesIO()
                             with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                                 export_df.to_excel(
@@ -193,22 +279,22 @@ if catalog_file and selected_stores:
                                     'A:A', 20, text_fmt)
                                 writer.sheets['Vendor_Order'].set_column(
                                     'B:B', 40)
-
-                            st.download_button(f"📥 Download {label}", buf.getvalue(
-                            ), file_name=f"{date_str}_{label}_{short_name}.xlsx", key=f"dl_{label}_{short_name}")
+                            st.download_button(f"📥 Download {label}", buf.getvalue(),
+                                               file_name=f"{date_str}_{label}_{short_name}.xlsx",
+                                               key=f"dl_{label}_{short_name}")
                         else:
                             st.write("No items in this category.")
                 else:
                     st.success(
                         "No vendor order needed (Items may be covered by HQ).")
-
             else:
                 st.error(f"Missing column '{long_name}' in Catalog.")
 
+# --- WELCOME / MISSING FILES STATE ---
 elif not selected_stores:
     st.warning(
         "Please select at least one store in the sidebar to begin processing.")
-else:
+elif not catalog_file:
     st.info("👋 **Welcome! Please upload the Southeast Catalog to begin.**")
     col_inst, col_img = st.columns([1, 1])
     with col_inst:
@@ -228,3 +314,6 @@ else:
                      use_container_width=True, caption="Select the 'Filtered' option.")
         except:
             st.warning("Reference image not found.")
+elif rules_matrix is None:
+    st.warning(
+        "⚠️ Please select a vendor and click 'Load Rules from Google Sheets' to continue.")
