@@ -65,7 +65,7 @@ def get_google_client():
     return gspread.authorize(creds)
 
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=3600)  # Cache for one hour
 def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
     """Pull the rules matrix for the given vendor from Google Sheets."""
     if vendor not in SHEET_IDS:
