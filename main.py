@@ -20,13 +20,8 @@ SHEET_IDS = {
 
 # SKUs to completely ignore - add any SKUs here that should be excluded from ordering
 IGNORE_SKUS = {
-    '29271',
-    '29270',
-    '29266',
-    '29269',
-    '29267',
-    '29268',
-    '29265'
+    # 'SKU123',
+    # 'SKU456',
 }
 
 store_map = {
@@ -56,11 +51,14 @@ def clean_id(val):
 
 @st.cache_data
 def load_catalog(file) -> pd.DataFrame:
-    df = pd.read_excel(file, header=1)
+    # Specify GTIN as string to preserve leading zeros
+    dtype_dict = {'GTIN': str, 'SKU': str}
+    df = pd.read_excel(file, header=1, dtype=dtype_dict)
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
     if 'GTIN' in df.columns:
-        df['GTIN'] = df['GTIN'].apply(clean_id)
+        # Keep GTIN as string and just strip whitespace
+        df['GTIN'] = df['GTIN'].astype(str).str.strip()
     return df
 
 
@@ -161,7 +159,22 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
     matched = len(rules_matrix['SKU'].unique())
     total = len(catalog_skus)
+
+    # Find SKUs that didn't match
+    rules_skus = set(rules_matrix['SKU'].unique())
+    unmatched_skus = catalog_skus - rules_skus
+    unmatched_list = sorted(list(unmatched_skus))
+
     st.caption(f"✅ Matched {matched} of {total} catalog SKUs to rules.")
+
+    # Log unmatched SKUs to console
+    if unmatched_skus:
+        print(f"\n⚠️  WARNING: {len(unmatched_skus)} Unmatched SKUs found:")
+        for sku in unmatched_list:
+            item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
+                df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
+            print(f"  - {sku}: {item_name}")
+        print(f"\nTotal unmatched: {len(unmatched_skus)}\n")
 
     tabs = st.tabs(selected_stores)
 
