@@ -267,6 +267,10 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
                         ed_hq.to_excel(writer, index=False,
                                        sheet_name='HQ_Transfer')
+                        # Format GTIN column as text to preserve leading zeros
+                        text_fmt = writer.book.add_format({'num_format': '@'})
+                        writer.sheets['HQ_Transfer'].set_column(
+                            'B:B', 20, text_fmt)
                     st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
                                        file_name=f"{date_str}_HQ_{short_name}.xlsx",
                                        key=f"dl_hq_{short_name}")
