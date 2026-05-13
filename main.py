@@ -18,6 +18,17 @@ SHEET_IDS = {
     # Add a line for each vendor
 }
 
+# SKUs to completely ignore - add any SKUs here that should be excluded from ordering
+IGNORE_SKUS = {
+    '29271',
+    '29270',
+    '29266',
+    '29269',
+    '29267',
+    '29268',
+    '29265'
+}
+
 store_map = {
     'Current Quantity City Market: DTR': 'CM',
     'Current Quantity Crabtree Valley Mall': 'CVM',
@@ -138,6 +149,9 @@ if catalog_file and rules_matrix is not None and selected_stores:
     catalog_skus = set(df_master['SKU'].unique())
     rules_matrix = rules_matrix[rules_matrix['SKU'].isin(catalog_skus)].copy()
 
+    # Remove any SKUs in the ignore list
+    rules_matrix = rules_matrix[~rules_matrix['SKU'].isin(IGNORE_SKUS)].copy()
+
     hq_col = 'Current Quantity HQ'
     date_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -213,6 +227,16 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
                 ed_hq = st.data_editor(hq_display, use_container_width=True,
                                        hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
+
+                # Display HQ Transfer Cost
+                if not ed_hq.empty:
+                    # Merge with original data to get unit cost
+                    ed_hq_with_cost = ed_hq.merge(
+                        data[['SKU', 'Default Unit Cost']], on='SKU', how='left'
+                    )
+                    hq_cost = (
+                        ed_hq_with_cost['Transfer_Qty'] * ed_hq_with_cost['Default Unit Cost']).sum()
+                    st.metric("🏭 HQ Transfer Cost", f"${hq_cost:,.2f}")
 
                 # 4. Vendor Remainder
                 hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
