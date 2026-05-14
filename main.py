@@ -85,6 +85,14 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
     df = pd.DataFrame(data)
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
+
+    # Coerce all non-SKU columns to numeric where possible.
+    # This prevents TypeError when Google Sheets returns numbers as strings
+    # due to cell formatting differences between vendor sheets.
+    for col in df.columns:
+        if col != 'SKU':
+            df[col] = pd.to_numeric(df[col], errors='ignore')
+
     return df
 
 
