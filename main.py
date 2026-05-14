@@ -14,7 +14,8 @@ SCOPES = [
 
 SHEET_IDS = {
 
-    'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ'
+    'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ',
+    'Test': '1w043eKET6T8-Fn5QSKFFkrintQt2p2h3CqDBAr665Bs'
     # Add a line for each vendor
 }
 
