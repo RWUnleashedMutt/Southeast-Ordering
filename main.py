@@ -132,11 +132,17 @@ with st.sidebar:
 # --- LOAD RULES FROM SHEETS ---
 rules_matrix = None
 
+# If the vendor changed, clear the old cached matrix so the user must reload
+if "rules_vendor" in st.session_state and st.session_state["rules_vendor"] != selected_vendor:
+    st.session_state.pop("rules_matrix", None)
+    st.session_state.pop("rules_vendor", None)
+
 if selected_vendor == "-- Select a Vendor --":
     st.sidebar.info("Please select a vendor to load rules.")
 elif load_rules_btn:
     with st.spinner(f"Loading rules matrix for **{selected_vendor}** from Google Sheets..."):
         try:
+            load_rules_from_sheets.clear()  # Force fresh fetch from Sheets
             rules_matrix = load_rules_from_sheets(selected_vendor)
             st.session_state["rules_matrix"] = rules_matrix
             st.session_state["rules_vendor"] = selected_vendor
@@ -144,7 +150,7 @@ elif load_rules_btn:
         except Exception as e:
             st.sidebar.error(f"❌ Failed to load rules: {e}")
 elif "rules_matrix" in st.session_state and st.session_state.get("rules_vendor") == selected_vendor:
-    # Keep the already-loaded matrix if vendor hasn't changed
+    # Restore already-loaded matrix if vendor hasn't changed
     rules_matrix = st.session_state["rules_matrix"]
     st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
 
