@@ -91,7 +91,11 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
     # due to cell formatting differences between vendor sheets.
     for col in df.columns:
         if col != 'SKU':
-            df[col] = pd.to_numeric(df[col], errors='ignore')
+            converted = pd.to_numeric(df[col], errors='coerce')
+            # Only replace if the conversion didn't turn everything to NaN
+            # (i.e. the column was actually numeric to begin with)
+            if converted.notna().sum() > 0:
+                df[col] = converted
 
     return df
 
@@ -142,7 +146,6 @@ if selected_vendor == "-- Select a Vendor --":
 elif load_rules_btn:
     with st.spinner(f"Loading rules matrix for **{selected_vendor}** from Google Sheets..."):
         try:
-            load_rules_from_sheets.clear()  # Force fresh fetch from Sheets
             rules_matrix = load_rules_from_sheets(selected_vendor)
             st.session_state["rules_matrix"] = rules_matrix
             st.session_state["rules_vendor"] = selected_vendor
