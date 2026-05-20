@@ -356,9 +356,10 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
                 data = pd.merge(store_inv, store_rules, on='SKU', how='left')
                 data = data.fillna({
-                    'DNO': False, 'Order In Quantities': 1, 'Min': 0,
+                    'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
                     'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
                 })
+                data['DNO'] = data['DNO'].astype(bool)
 
                 # 2. Split Trigger Logic
                 data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
