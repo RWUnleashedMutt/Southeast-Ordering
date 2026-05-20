@@ -223,11 +223,22 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
 
-    # Coerce all non-SKU columns to numeric where possible.
-    # This prevents TypeError when Google Sheets returns numbers as strings
-    # due to cell formatting differences between vendor sheets.
+    # Coerce columns to the correct types.
+    # _DNO columns are treated separately because Google Sheets can return booleans
+    # as native bool, integers (0/1), or text strings ('TRUE'/'FALSE') depending on
+    # cell formatting. Running pd.to_numeric on text strings produces NaN, which then
+    # causes fillna(0) + astype(bool) downstream to flip every 'FALSE' string to True
+    # — silently blocking all items from being ordered. The explicit map below handles
+    # all three formats safely.
     for col in df.columns:
-        if col != 'SKU':
+        if col == 'SKU':
+            continue
+        if col.endswith('_DNO'):
+            df[col] = df[col].map(
+                lambda x: str(x).strip().upper() in ('TRUE', '1', 'YES', '1.0')
+                if pd.notna(x) else False
+            ).astype(bool)
+        else:
             converted = pd.to_numeric(df[col], errors='coerce')
             # Only replace if the conversion didn't turn everything to NaN
             # (i.e. the column was actually numeric to begin with)
@@ -281,6 +292,7 @@ if "rules_vendor" in st.session_state and st.session_state["rules_vendor"] != se
 if selected_vendor == "-- Select a Vendor --":
     st.sidebar.info("Please select a vendor to load rules.")
 elif load_rules_btn:
+    load_rules_from_sheets.clear()  # Force fresh pull — bypasses TTL cache
     with st.spinner(f"Loading rules matrix for **{selected_vendor}** from Google Sheets..."):
         try:
             rules_matrix = load_rules_from_sheets(selected_vendor)
@@ -413,8 +425,9 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     lambda x: hq_final_map.get(x, 0))
                 data['Vendor_Units'] = (
                     data['Total_Units_Needed'] - data['Final_HQ_Qty']).clip(lower=0)
-                data['Vendor_Cases'] = data['Vendor_Units'] / \
-                    data['Order In Quantities']
+                data['Vendor_Cases'] = np.ceil(
+                    data['Vendor_Units'] / data['Order In Quantities']
+                )
 
                 if not ed_hq.empty:
                     st.metric("Total Transfer Units",
