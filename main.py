@@ -14,13 +14,18 @@ SCOPES = [
 
 SHEET_IDS = {
     'All Vendors': '1W-AGqIXwcqL7clDHad43hFmpPrrXzNUDYC4-dVGpngo',
-    'Adored Beast': '1HwOxpAzI_HlntVVfOqxBVAWDy7cznPxxhUqOR5cy6ng',
-    'Butchers Block': '1nDtvvDVu9tAzR2iDB4uMpUG3rcN3Fm_v09WJw3jvbJI',
-    'Canine Caviar': '1TJXe9V_aF1A1wm_O9XK_iWJNU119iH3ZBBorUlX_0ss',
-    'Fluff & Tuff': '1nGWM9Lt34e3vpqaETjPeMVsCTKVC9kIEQ3VVx1mEUqY',
-    'Front Porch Pets': '1CyW8rNNWzmYH9iqVRgN5iTWCiqgd-cJnrAJGktGS2a0',
-    'InClover': '1GJX-rqphRYAHM50HKrXhE3qG3ZUeB9kP0njwcuM56co',
-    'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ',
+    "Adored Beast": "1HwOxpAzI_HlntVVfOqxBVAWDy7cznPxxhUqOR5cy6ng",
+    "Aroma Paws": "1fTvxu-y3rVpvxkt8elR1bZMECReblLE0zmYQDr1ePPg",
+    "Bradley Caldwell": "1eqENDXTdDJVKdos-VUXYNYMNM806rNcDrv63Q654nyc",
+    "Butchers Block": "1nDtvvDVu9tAzR2iDB4uMpUG3rcN3Fm_v09WJw3jvbJI",
+    "Canine Caviar": "1TJXe9V_aF1A1wm_O9XK_iWJNU119iH3ZBBorUlX_0ss",
+    "Colorado Pet Treats": "1U4nQGJvgyPWLST96Y6a4yrgJ2jGGicS6p4f7jesL8p8",
+    "Fluff & Tuff": "1nGWM9Lt34e3vpqaETjPeMVsCTKVC9kIEQ3VVx1mEUqY",
+    "Front Porch Pets": "1CyW8rNNWzmYH9iqVRgN5iTWCiqgd-cJnrAJGktGS2a0",
+    "InClover": "1GJX-rqphRYAHM50HKrXhE3qG3ZUeB9kP0njwcuM56co",
+    "Kennel Master": "1YgbCH_UxFZYAKnyJRki1ReNIdgqyUHtPS8gztUbpJaQ",
+    "Polka Dog": "1JUFN_ErS6FXUKD9gv_RzccxJplwpEDiaX3Am4LW0shw",
+    "SE": "1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ",
     # Add a line for each vendor
 }
 
