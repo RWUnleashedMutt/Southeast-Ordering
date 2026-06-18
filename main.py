@@ -20,6 +20,7 @@ SHEET_IDS = {
     "Butchers Block": "1nDtvvDVu9tAzR2iDB4uMpUG3rcN3Fm_v09WJw3jvbJI",
     "Canine Caviar": "1TJXe9V_aF1A1wm_O9XK_iWJNU119iH3ZBBorUlX_0ss",
     "Colorado Pet Treats": "1U4nQGJvgyPWLST96Y6a4yrgJ2jGGicS6p4f7jesL8p8",
+    "Dexy Paws": "1fux791xEUU9shk2kyyFK6B-f6sjJlx3zser-jq9oHYU",
     "Fluff & Tuff": "1nGWM9Lt34e3vpqaETjPeMVsCTKVC9kIEQ3VVx1mEUqY",
     "Front Porch Pets": "1CyW8rNNWzmYH9iqVRgN5iTWCiqgd-cJnrAJGktGS2a0",
     "InClover": "1GJX-rqphRYAHM50HKrXhE3qG3ZUeB9kP0njwcuM56co",
