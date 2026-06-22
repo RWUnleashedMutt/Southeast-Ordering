@@ -116,9 +116,27 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
     return df
 
 
+# --- SESSION STATE INITIALIZATION ---
+@st.cache_resource
+def init_session_defaults():
+    """Initialize all session state defaults upfront."""
+    defaults = {
+        "rules_vendor": None,
+        "rules_matrix": None,
+        "hq_allocations": {},  # Structure: {sku: {store_code: qty}}
+        "lead_times": {},  # Structure: {store_code: days}
+        "current_tab": 0,  # Track which store tab user is viewing
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+
 # --- APP ---
 st.set_page_config(page_title="Inventory & Ordering System", layout="wide")
 st.title("📦 Southeast Inventory & Ordering")
+
+# Initialize session state
+init_session_defaults()
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -132,6 +150,12 @@ with st.sidebar:
         "Select vendor to load rules from Google Sheets:",
         options=["-- Select a Vendor --"] + list(SHEET_IDS.keys())
     )
+
+    # **Clear state when vendor changes**
+    if selected_vendor != st.session_state.rules_vendor and selected_vendor != "-- Select a Vendor --":
+        st.session_state.rules_matrix = None
+        st.session_state.rules_vendor = None
+        st.session_state.hq_allocations = {}  # Clear orphaned allocations
 
     load_rules_btn = st.button("📥 Load Rules from Google Sheets")
 
@@ -150,19 +174,27 @@ with st.sidebar:
 
     st.divider()
     st.header("5. Store Lead Times (Days)")
-    store_lead_times = {
-        s: st.number_input(
-            f"Lead Time: {s}", 0, 30, (1 if s in priority_stores else 7))
-        for s in selected_stores
-    }
+
+    # **Persist lead times to session state**
+    for s in selected_stores:
+        if s not in st.session_state.lead_times:
+            st.session_state.lead_times[s] = 1 if s in priority_stores else 7
+
+    store_lead_times = {}
+    for s in selected_stores:
+        new_time = st.number_input(
+            f"Lead Time: {s}",
+            0, 30,
+            st.session_state.lead_times[s],
+            key=f"lt_{s}"
+        )
+        # Update session state if changed
+        if new_time != st.session_state.lead_times[s]:
+            st.session_state.lead_times[s] = new_time
+        store_lead_times[s] = new_time
 
 # --- LOAD RULES FROM SHEETS ---
 rules_matrix = None
-
-# If the vendor changed, clear the old cached matrix so the user must reload
-if "rules_vendor" in st.session_state and st.session_state["rules_vendor"] != selected_vendor:
-    st.session_state.pop("rules_matrix", None)
-    st.session_state.pop("rules_vendor", None)
 
 if selected_vendor == "-- Select a Vendor --":
     st.sidebar.info("Please select a vendor to load rules.")
@@ -188,6 +220,13 @@ if catalog_file and rules_matrix is not None and selected_stores:
     # Filter rules to only SKUs present in the catalog
     catalog_skus = set(df_master['SKU'].unique())
     rules_matrix = rules_matrix[rules_matrix['SKU'].isin(catalog_skus)].copy()
+
+    # Validate Order In Quantities (OIQ) to prevent division by zero
+    invalid_oiq = rules_matrix[rules_matrix['Order In Quantities'] <= 0]
+    if not invalid_oiq.empty:
+        st.error(
+            f"❌ Invalid Order In Quantities found (must be > 0):\n{invalid_oiq[['SKU', 'Order In Quantities']].to_string()}")
+        st.stop()
 
     hq_col = 'Current Quantity HQ'
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -267,7 +306,8 @@ if catalog_file and rules_matrix is not None and selected_stores:
             data['Units_Needed'] = data['Units_Needed'].fillna(0)
 
             store_needs_map[store_code] = data[data['Units_Needed'] > 0][
-                ['SKU', 'Units_Needed', 'Current_Inv', 'HQ_Qty']
+                ['SKU', 'Units_Needed', 'Current_Inv',
+                    'HQ_Qty', 'Order In Quantities']
             ].copy()
 
         # Consolidate demand across stores (vectorized)
@@ -351,6 +391,11 @@ if catalog_file and rules_matrix is not None and selected_stores:
         if "hq_allocations" not in st.session_state:
             st.session_state.hq_allocations = {}
 
+        # Ensure all SKUs in candidates have a store dict
+        for sku in allocation_candidates:
+            if sku not in st.session_state.hq_allocations:
+                st.session_state.hq_allocations[sku] = {}
+
         st.write("**Allocate HQ Qty by Store:**")
 
         # Build allocation inputs and track totals dynamically
@@ -371,17 +416,18 @@ if catalog_file and rules_matrix is not None and selected_stores:
             for col_idx, store_code in enumerate(selected_stores):
                 if store_code in info['stores']:
                     with alloc_cols[col_idx]:
-                        key = f"alloc_{sku}_{store_code}"
-                        if key not in st.session_state.hq_allocations:
-                            st.session_state.hq_allocations[key] = 0
+                        # **Use nested structure: allocs[sku][store_code]**
+                        if store_code not in st.session_state.hq_allocations[sku]:
+                            st.session_state.hq_allocations[sku][store_code] = 0
 
                         # Ensure hq_available is positive before using as max_value
                         max_alloc = max(int(hq_available), 0)
 
                         allocated = st.number_input(
-                            f"{store_code}", 0, max_alloc, 0, step=oiq, key=key
+                            f"{store_code}", 0, max_alloc, 0, step=oiq,
+                            key=f"alloc_{sku}_{store_code}"
                         )
-                        st.session_state.hq_allocations[key] = allocated
+                        st.session_state.hq_allocations[sku][store_code] = allocated
                         total_allocated += allocated
 
                         # Show current inventory and demand in small text
@@ -464,9 +510,10 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). Delete a row or set Qty to 0 to move it to the Vendor Order.")
 
                 # Apply user allocation if it exists
+                # **Use nested dict structure: allocs[sku][store_code]**
                 data['Allocated_HQ'] = data['SKU'].apply(
                     lambda sku: st.session_state.hq_allocations.get(
-                        f"alloc_{sku}_{short_name}", 0)
+                        sku, {}).get(short_name, 0)
                     if "hq_allocations" in st.session_state else 0
                 )
 
@@ -631,9 +678,10 @@ if catalog_file and rules_matrix is not None and selected_stores:
             ) * data['Order In Quantities']
 
             # Apply allocation if exists
+            # **Use nested dict structure: allocs[sku][store_code]**
             data['Allocated_HQ'] = data['SKU'].apply(
                 lambda sku: st.session_state.hq_allocations.get(
-                    f"alloc_{sku}_{short_name}", 0)
+                    sku, {}).get(short_name, 0)
                 if "hq_allocations" in st.session_state else 0
             )
 
