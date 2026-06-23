@@ -126,6 +126,7 @@ def init_session_defaults():
         "hq_allocations": {},  # Structure: {sku: {store_code: qty}}
         "lead_times": {},  # Structure: {store_code: days}
         "current_tab": 0,  # Track which store tab user is viewing
+        "allocations_submitted": False,  # Track if allocations have been locked in
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -156,6 +157,7 @@ with st.sidebar:
         st.session_state.rules_matrix = None
         st.session_state.rules_vendor = None
         st.session_state.hq_allocations = {}  # Clear orphaned allocations
+        st.session_state.allocations_submitted = False  # Reset allocation submission
 
     load_rules_btn = st.button("📥 Load Rules from Google Sheets")
 
@@ -396,66 +398,75 @@ if catalog_file and rules_matrix is not None and selected_stores:
             if sku not in st.session_state.hq_allocations:
                 st.session_state.hq_allocations[sku] = {}
 
+        # Use a form to batch all allocation inputs — no reruns until submit
         st.write("**Allocate HQ Qty by Store:**")
-
-        # Build allocation inputs and track totals dynamically
-        for sku in sorted(allocation_candidates.keys()):
-            info = allocation_candidates[sku]
-            item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
-                df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
-            hq_available = int(info['hq_qty'])
-            oiq = int(info['oiq'])
-            demand_map = info.get('demand_map', {})
-
-            st.markdown(f"**{sku}** — {item_name} (Case Pack: {oiq})")
-
-            alloc_cols = st.columns(len(selected_stores) + 1)
-
-            # Calculate total allocated for this SKU
-            total_allocated = 0
-            for col_idx, store_code in enumerate(selected_stores):
-                if store_code in info['stores']:
-                    with alloc_cols[col_idx]:
-                        # **Use nested structure: allocs[sku][store_code]**
-                        if store_code not in st.session_state.hq_allocations[sku]:
-                            st.session_state.hq_allocations[sku][store_code] = 0
-
-                        # Ensure hq_available is positive before using as max_value
-                        max_alloc = max(int(hq_available), 0)
-
-                        allocated = st.number_input(
-                            f"{store_code}", 0, max_alloc, 0, step=oiq,
-                            key=f"alloc_{sku}_{store_code}"
-                        )
-                        st.session_state.hq_allocations[sku][store_code] = allocated
-                        total_allocated += allocated
-
-                        # Show current inventory and demand in small text
-                        store_demand_info = demand_map.get(store_code, {})
-                        current_inv = int(
-                            store_demand_info.get('current_inv', 0))
-                        demand = int(store_demand_info.get('demand', 0))
-                        st.caption(f"Has: {current_inv} | Needs: {demand}")
-
-            # Show remaining in last column
-            remaining = hq_available - total_allocated
-            with alloc_cols[-1]:
-                st.metric(
-                    "Remaining",
-                    remaining,
-                    delta=f"of {hq_available}",
-                    delta_color="inverse" if remaining >= 0 else "off"
-                )
-
-            # Warn if over-allocated
-            if remaining < 0:
-                st.error(
-                    f"⚠️ Over-allocated by {abs(remaining)} units for SKU {sku}")
-
-            st.divider()
-
         st.info(
-            "👆 Manually allocate HQ qty to stores. Unallocated stores will automatically order from vendors.")
+            "👆 Make all allocation changes below, then click Submit. No reruns until you're ready!")
+
+        with st.form("allocation_form"):
+            # Build allocation inputs and track totals dynamically
+            for sku in sorted(allocation_candidates.keys()):
+                info = allocation_candidates[sku]
+                item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
+                    df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
+                hq_available = int(info['hq_qty'])
+                oiq = int(info['oiq'])
+                demand_map = info.get('demand_map', {})
+
+                st.markdown(f"**{sku}** — {item_name} (Case Pack: {oiq})")
+
+                alloc_cols = st.columns(len(selected_stores) + 1)
+
+                # Calculate total allocated for this SKU
+                total_allocated = 0
+                for col_idx, store_code in enumerate(selected_stores):
+                    if store_code in info['stores']:
+                        with alloc_cols[col_idx]:
+                            # **Use nested structure: allocs[sku][store_code]**
+                            if store_code not in st.session_state.hq_allocations[sku]:
+                                st.session_state.hq_allocations[sku][store_code] = 0
+
+                            # Ensure hq_available is positive before using as max_value
+                            max_alloc = max(int(hq_available), 0)
+
+                            allocated = st.number_input(
+                                f"{store_code}", 0, max_alloc,
+                                value=st.session_state.hq_allocations[sku][store_code],
+                                step=oiq,
+                                key=f"alloc_{sku}_{store_code}"
+                            )
+                            st.session_state.hq_allocations[sku][store_code] = allocated
+                            total_allocated += allocated
+
+                            # Show current inventory and demand in small text
+                            store_demand_info = demand_map.get(store_code, {})
+                            current_inv = int(
+                                store_demand_info.get('current_inv', 0))
+                            demand = int(store_demand_info.get('demand', 0))
+                            st.caption(f"Has: {current_inv} | Needs: {demand}")
+
+                # Show remaining in last column
+                remaining = hq_available - total_allocated
+                with alloc_cols[-1]:
+                    st.metric(
+                        "Remaining",
+                        remaining,
+                        delta=f"of {hq_available}",
+                        delta_color="inverse" if remaining >= 0 else "off"
+                    )
+
+                # Warn if over-allocated
+                if remaining < 0:
+                    st.error(
+                        f"⚠️ Over-allocated by {abs(remaining)} units for SKU {sku}")
+
+                st.divider()
+
+            # Submit button (only this triggers a rerun with all changes batched)
+            submitted = st.form_submit_button(
+                "✅ Submit Allocations", use_container_width=True)
+            if submitted:
+                st.session_state.allocations_submitted = True
 
     tabs = st.tabs(selected_stores)
 
@@ -517,14 +528,21 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     if "hq_allocations" in st.session_state else 0
                 )
 
+                # Mark which SKUs are allocation candidates (conflict items)
+                data['Is_Allocation_Candidate'] = data['SKU'].isin(
+                    allocation_candidates.keys())
+
                 # Use allocated amount if specified, otherwise use suggested amount
+                # **EXCLUDE allocation candidates unless they've been allocated**
                 data['Suggested_HQ_Qty'] = np.where(
                     (data['Total_Units_Needed'] > 0) & (
                         data['Allocated_HQ'] > 0),
-                    data['Allocated_HQ'],
+                    data['Allocated_HQ'],  # If allocated, use that amount
                     np.where(
-                        (data['Total_Units_Needed'] > 0) & (
-                            data['HQ_Qty'] > hq_threshold),
+                        (data['Total_Units_Needed'] > 0) &
+                        (data['HQ_Qty'] > hq_threshold) &
+                        # Only suggest if NOT a conflict item
+                        (~data['Is_Allocation_Candidate']),
                         data['Total_Units_Needed'], 0
                     )
                 )
@@ -685,12 +703,20 @@ if catalog_file and rules_matrix is not None and selected_stores:
                 if "hq_allocations" in st.session_state else 0
             )
 
+            # Mark which SKUs are allocation candidates (conflict items)
+            data['Is_Allocation_Candidate'] = data['SKU'].isin(
+                allocation_candidates.keys())
+
+            # Use allocated amount if specified, otherwise use suggested amount
+            # **EXCLUDE allocation candidates unless they've been allocated**
             data['Suggested_HQ_Qty'] = np.where(
                 (data['Total_Units_Needed'] > 0) & (data['Allocated_HQ'] > 0),
-                data['Allocated_HQ'],
+                data['Allocated_HQ'],  # If allocated, use that amount
                 np.where(
-                    (data['Total_Units_Needed'] > 0) & (
-                        data['HQ_Qty'] > hq_threshold),
+                    (data['Total_Units_Needed'] > 0) &
+                    (data['HQ_Qty'] > hq_threshold) &
+                    # Only suggest if NOT a conflict item
+                    (~data['Is_Allocation_Candidate']),
                     data['Total_Units_Needed'], 0
                 )
             )
