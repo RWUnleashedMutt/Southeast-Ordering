@@ -117,14 +117,12 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
 
 
 # --- SESSION STATE INITIALIZATION ---
-@st.cache_resource
 def init_session_defaults():
     """Initialize all session state defaults upfront."""
     defaults = {
         "rules_vendor": None,
         "rules_matrix": None,
         "hq_allocations": {},  # Structure: {sku: {store_code: qty}}
-        "lead_times": {},  # Structure: {store_code: days}
         "current_tab": 0,  # Track which store tab user is viewing
         "allocations_submitted": False,  # Track if allocations have been locked in
     }
@@ -174,27 +172,6 @@ with st.sidebar:
         "Suggest HQ Transfer if HQ Qty >", 0, 20, 6,
         help="Items with HQ stock exceeding this amount will be suggested for HQ transfer."
     )
-
-    st.divider()
-    st.header("5. Store Lead Times (Days)")
-
-    # **Persist lead times to session state**
-    for s in selected_stores:
-        if s not in st.session_state.lead_times:
-            st.session_state.lead_times[s] = 1 if s in priority_stores else 7
-
-    store_lead_times = {}
-    for s in selected_stores:
-        new_time = st.number_input(
-            f"Lead Time: {s}",
-            0, 30,
-            st.session_state.lead_times[s],
-            key=f"lt_{s}"
-        )
-        # Update session state if changed
-        if new_time != st.session_state.lead_times[s]:
-            st.session_state.lead_times[s] = new_time
-        store_lead_times[s] = new_time
 
 # --- LOAD RULES FROM SHEETS ---
 rules_matrix = None
@@ -268,7 +245,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
         store_needs_map = {}
         for store_code in selected_stores_tuple:
             long_name = inv_store_map[store_code]
-            current_lt = store_lead_times[store_code]
 
             lookup_cols = ['SKU', 'Order In Quantities',
                            f'{store_code}_DNO', f'{store_code}_Min', f'{store_code}_Max']
@@ -290,7 +266,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
             })
             data['DNO'] = data['DNO'].astype(bool)
 
-            data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
+            data['Effective_Min'] = data['Min']
             data['Needs_Order'] = np.where(
                 data['Order In Quantities'] == 1,
                 (data['Current_Inv'] < data['Max']),
@@ -388,7 +364,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
             })
 
         alloc_df = pd.DataFrame(allocation_data)
-        st.dataframe(alloc_df, use_container_width=True, hide_index=True)
+        st.dataframe(alloc_df, width='stretch', hide_index=True)
 
         # Initialize session state for allocations
         if "hq_allocations" not in st.session_state:
@@ -475,8 +451,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
         long_name = inv_store_map[short_name]
         with tabs[i]:
             if long_name in df_master.columns:
-                current_lt = store_lead_times[short_name]
-
                 # 1. Rules & Merge
                 lookup_cols = ['SKU', 'Order In Quantities',
                                f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
@@ -500,7 +474,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
                 data['DNO'] = data['DNO'].astype(bool)
 
                 # 2. Split Trigger Logic
-                data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
+                data['Effective_Min'] = data['Min']
                 data['Needs_Order'] = np.where(
                     data['Order In Quantities'] == 1,
                     (data['Current_Inv'] < data['Max']),
@@ -657,8 +631,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
     for i, short_name in enumerate(selected_stores):
         long_name = inv_store_map[short_name]
         if long_name in df_master.columns:
-            current_lt = store_lead_times[short_name]
-
             # Rebuild store data (same as tabs)
             lookup_cols = ['SKU', 'Order In Quantities',
                            f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
@@ -681,7 +653,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
             })
             data['DNO'] = data['DNO'].astype(bool)
 
-            data['Effective_Min'] = data['Min'] + (current_lt * 0.2)
+            data['Effective_Min'] = data['Min']
             data['Needs_Order'] = np.where(
                 data['Order In Quantities'] == 1,
                 (data['Current_Inv'] < data['Max']),
