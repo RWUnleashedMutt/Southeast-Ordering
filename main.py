@@ -134,10 +134,11 @@ def init_session_defaults():
 
 # --- APP ---
 st.set_page_config(page_title="Inventory & Ordering System", layout="wide")
-st.title("📦 Southeast Inventory & Ordering")
 
-# Initialize session state
+# Initialize session state FIRST (before any state access)
 init_session_defaults()
+
+st.title("📦 Southeast Inventory & Ordering")
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -153,7 +154,7 @@ with st.sidebar:
     )
 
     # **Clear state when vendor changes**
-    if selected_vendor != st.session_state.rules_vendor and selected_vendor != "-- Select a Vendor --":
+    if selected_vendor != st.session_state.get("rules_vendor") and selected_vendor != "-- Select a Vendor --":
         st.session_state.rules_matrix = None
         st.session_state.rules_vendor = None
         st.session_state.hq_allocations = {}  # Clear orphaned allocations
@@ -210,7 +211,7 @@ elif load_rules_btn:
             st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
         except Exception as e:
             st.sidebar.error(f"❌ Failed to load rules: {e}")
-elif "rules_matrix" in st.session_state and st.session_state.get("rules_vendor") == selected_vendor:
+elif st.session_state.get("rules_matrix") is not None and st.session_state.get("rules_vendor") == selected_vendor:
     # Restore already-loaded matrix if vendor hasn't changed
     rules_matrix = st.session_state["rules_matrix"]
     st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
