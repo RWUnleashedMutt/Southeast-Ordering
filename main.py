@@ -13,6 +13,7 @@ SCOPES = [
 ]
 
 SHEET_IDS = {
+    "All Vendors": "1W-AGqIXwcqL7clDHad43hFmpPrrXzNUDYC4-dVGpngo",
     "Adored Beast": "1HwOxpAzI_HlntVVfOqxBVAWDy7cznPxxhUqOR5cy6ng",
     "Aroma Paws": "1fTvxu-y3rVpvxkt8elR1bZMECReblLE0zmYQDr1ePPg",
     "Bradley Caldwell": "1eqENDXTdDJVKdos-VUXYNYMNM806rNcDrv63Q654nyc",
