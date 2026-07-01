@@ -31,6 +31,7 @@ SHEET_IDS = {
     "InClover": "1GJX-rqphRYAHM50HKrXhE3qG3ZUeB9kP0njwcuM56co",
     "Kennel Master": "1YgbCH_UxFZYAKnyJRki1ReNIdgqyUHtPS8gztUbpJaQ",
     "Nordic Naturals": "1QvApqLGh0uFcRbbNLkpxcyqMdihM_zrc2cvvJEJ9YEg",
+    "PAW": "1pWnAVNS2oRb38Dv1oXR2mwhdQbVCSG2tnUVCM-5SrTo",
     "Playology": "1crFl1pFzMluFAcUTuMcrTaAJGETtua3iU8L8HIELny8",
     "Polka Dog": "1JUFN_ErS6FXUKD9gv_RzccxJplwpEDiaX3Am4LW0shw",
     "SE": "1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ",
@@ -242,107 +243,154 @@ if catalog_file and rules_matrix is not None and selected_stores:
             print(f"  - {sku}: {item_name}")
         print(f"\nTotal unmatched: {len(unmatched_skus)}\n")
 
-    # --- PRE-ALLOCATION LOGIC (OPTIMIZED) ---
-    # Build allocation candidates with vectorized operations
-    @st.cache_data(ttl=3600)
-    def get_allocation_candidates(vendor_name, selected_stores_tuple, hq_threshold):
-        """Identify items with HQ allocation conflicts (demand > supply)."""
-        allocation_candidates = {}
+    # --- CORE ORDER CALCULATION ---
+    def compute_store_order(store_code, df_master, rules_matrix, hq_col,
+                            hq_threshold, allocation_candidates, hq_allocations):
+        """
+        Single source of truth for all order calculations.
+        Returns a fully computed DataFrame for one store with columns:
+          SKU, GTIN, Item Name, Default Unit Cost, Current_Inv, HQ_Qty,
+          Order In Quantities, Min, Max, DNO,
+          Total_Units_Needed, Allocated_HQ, Is_Allocation_Candidate,
+          Suggested_HQ_Qty, Vendor_Units, Vendor_Cases
+        """
+        long_name = inv_store_map[store_code]
 
-        # Scan each store's needs once
-        store_needs_map = {}
-        for store_code in selected_stores_tuple:
+        lookup_cols = ['SKU', 'Order In Quantities',
+                       f'{store_code}_DNO', f'{store_code}_Min', f'{store_code}_Max']
+        valid_lookup = [c for c in lookup_cols if c in rules_matrix.columns]
+        store_rules = rules_matrix[valid_lookup].copy().rename(columns={
+            f'{store_code}_DNO': 'DNO',
+            f'{store_code}_Min': 'Min',
+            f'{store_code}_Max': 'Max'
+        })
+
+        extra_cols = ['SKU', 'GTIN', 'Item Name',
+                      'Default Unit Cost', long_name, hq_col]
+        available_cols = [c for c in extra_cols if c in df_master.columns]
+        store_inv = df_master[available_cols].copy().rename(
+            columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'}
+        )
+
+        data = pd.merge(store_inv, store_rules, on='SKU', how='left')
+        data = data.fillna({
+            'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
+            'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
+        })
+        data['DNO'] = data['DNO'].astype(bool)
+
+        # Order trigger logic
+        data['Effective_Min'] = data['Min']
+        data['Needs_Order'] = np.where(
+            data['Order In Quantities'] == 1,
+            (data['Current_Inv'] < data['Max']),
+            (data['Current_Inv'] < data['Effective_Min'])
+        )
+        data['Needs_Order'] = data['Needs_Order'] & (data['DNO'] == False)
+        data['Units_Needed_To_Max'] = np.where(
+            data['Needs_Order'],
+            np.maximum(data['Max'] - data['Current_Inv'], 0),
+            0
+        )
+        data['Total_Units_Needed'] = np.ceil(
+            np.maximum(data['Units_Needed_To_Max'], 0) /
+            data['Order In Quantities']
+        ) * data['Order In Quantities']
+
+        # HQ allocation awareness
+        data['Allocated_HQ'] = data['SKU'].apply(
+            lambda sku: hq_allocations.get(sku, {}).get(store_code, 0)
+        )
+        data['Is_Allocation_Candidate'] = data['SKU'].isin(
+            allocation_candidates.keys())
+
+        data['Suggested_HQ_Qty'] = np.where(
+            (data['Total_Units_Needed'] > 0) & (data['Allocated_HQ'] > 0),
+            data['Allocated_HQ'],
+            np.where(
+                (data['Total_Units_Needed'] > 0) &
+                (data['HQ_Qty'] > hq_threshold) &
+                (~data['Is_Allocation_Candidate']),
+                data['Total_Units_Needed'], 0
+            )
+        )
+
+        data['Vendor_Units'] = (
+            data['Total_Units_Needed'] - data['Suggested_HQ_Qty']
+        ).clip(lower=0)
+        data['Vendor_Cases'] = np.ceil(
+            data['Vendor_Units'] / data['Order In Quantities']
+        )
+
+        return data
+
+    # --- PRE-ALLOCATION: FIND HQ CONFLICT SKUS ---
+    def get_allocation_candidates(df_master, rules_matrix, hq_col,
+                                  selected_stores, hq_threshold):
+        """
+        Identify SKUs where total store demand exceeds HQ supply.
+        Accepts data as arguments so caching is based on actual content.
+        """
+        store_needs_list = []
+
+        for store_code in selected_stores:
             long_name = inv_store_map[store_code]
+            if long_name not in df_master.columns:
+                continue
 
-            lookup_cols = ['SKU', 'Order In Quantities',
-                           f'{store_code}_DNO', f'{store_code}_Min', f'{store_code}_Max']
-            valid_lookup = [
-                c for c in lookup_cols if c in rules_matrix.columns]
-            store_rules = rules_matrix[valid_lookup].copy().rename(columns={
-                f'{store_code}_DNO': 'DNO',
-                f'{store_code}_Min': 'Min',
-                f'{store_code}_Max': 'Max'
-            })
-
-            store_inv = df_master[['SKU', long_name, hq_col]].copy().rename(
-                columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'}
+            # Use compute_store_order with empty allocations to get raw demand
+            data = compute_store_order(
+                store_code, df_master, rules_matrix, hq_col,
+                hq_threshold, allocation_candidates={}, hq_allocations={}
             )
-
-            data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-            data = data.fillna({
-                'DNO': 0, 'Order In Quantities': 1, 'Min': 0, 'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0
-            })
-            data['DNO'] = data['DNO'].astype(bool)
-
-            data['Effective_Min'] = data['Min']
-            data['Needs_Order'] = np.where(
-                data['Order In Quantities'] == 1,
-                (data['Current_Inv'] < data['Max']),
-                (data['Current_Inv'] < data['Effective_Min'])
-            )
-            data['Needs_Order'] = data['Needs_Order'] & (data['DNO'] == False)
-            data['Units_Needed_To_Max'] = np.where(
-                data['Needs_Order'],
-                np.maximum(data['Max'] - data['Current_Inv'], 0),
-                0
-            )
-            # Round to Order In Quantities (case packs) like per-store logic does
-            data['Units_Needed'] = np.ceil(
-                data['Units_Needed_To_Max'] / data['Order In Quantities']
-            ) * data['Order In Quantities']
-            data['Units_Needed'] = data['Units_Needed'].fillna(0)
-
-            store_needs_map[store_code] = data[data['Units_Needed'] > 0][
-                ['SKU', 'Units_Needed', 'Current_Inv',
+            needs = data[data['Total_Units_Needed'] > 0][
+                ['SKU', 'Total_Units_Needed', 'Current_Inv',
                     'HQ_Qty', 'Order In Quantities']
             ].copy()
+            needs['Store'] = store_code
+            needs.rename(
+                columns={'Total_Units_Needed': 'Units_Needed'}, inplace=True)
+            store_needs_list.append(needs)
 
-        # Consolidate demand across stores (vectorized)
-        sku_demand_list = []
-        for store_code, needs_df in store_needs_map.items():
-            needs_df['Store'] = store_code
-            sku_demand_list.append(needs_df)
-
-        if not sku_demand_list:
+        if not store_needs_list:
             return {}
 
-        combined = pd.concat(sku_demand_list, ignore_index=True)
+        combined = pd.concat(store_needs_list, ignore_index=True)
 
-        # Group by SKU to find items with conflicts
         sku_groups = combined.groupby('SKU').agg({
             'Units_Needed': 'sum',
             'HQ_Qty': 'first',
             'Store': 'count'
         }).rename(columns={'Store': 'Store_Count'})
 
-        # Filter: only items where demand > hq_qty AND hq_qty > threshold (actual conflict to resolve)
-        conflicts = sku_groups[(sku_groups['Units_Needed'] > sku_groups['HQ_Qty']) & (
-            sku_groups['HQ_Qty'] > hq_threshold)]
+        # Conflict = total demand exceeds HQ supply AND HQ has meaningful stock
+        conflicts = sku_groups[
+            (sku_groups['Units_Needed'] > sku_groups['HQ_Qty']) &
+            (sku_groups['HQ_Qty'] > hq_threshold)
+        ]
 
-        # Build allocation candidates with demand map
+        allocation_candidates = {}
         for sku in conflicts.index:
             sku_data = combined[combined['SKU'] == sku]
-            demand_map = {}
-            for _, row in sku_data.iterrows():
-                demand_map[row['Store']] = {
+            demand_map = {
+                row['Store']: {
                     'demand': int(row['Units_Needed']),
                     'current_inv': int(row['Current_Inv'])
                 }
-
+                for _, row in sku_data.iterrows()
+            }
             allocation_candidates[sku] = {
                 'stores': list(sku_data['Store'].unique()),
                 'hq_qty': int(sku_data['HQ_Qty'].iloc[0]),
                 'demand_map': demand_map,
-                'oiq': int(sku_data['Order In Quantities'].iloc[0]) if 'Order In Quantities' in sku_data.columns else 1
+                'oiq': int(sku_data['Order In Quantities'].iloc[0])
+                if 'Order In Quantities' in sku_data.columns else 1
             }
 
         return allocation_candidates
 
-    # Call optimized function with hashable inputs
     allocation_candidates = get_allocation_candidates(
-        selected_vendor,
-        tuple(selected_stores),
-        hq_threshold
+        df_master, rules_matrix, hq_col, selected_stores, hq_threshold
     )
 
     # Show pre-allocation UI if there are candidates
@@ -447,11 +495,86 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
                 st.divider()
 
-            # Submit button (only this triggers a rerun with all changes batched)
+            # Track whether any SKU is over-allocated
+            over_allocated_skus = []
+            for sku in sorted(allocation_candidates.keys()):
+                info = allocation_candidates[sku]
+                hq_available = int(info['hq_qty'])
+                total_allocated = sum(
+                    st.session_state.hq_allocations.get(
+                        sku, {}).get(store_code, 0)
+                    for store_code in selected_stores
+                    if store_code in info['stores']
+                )
+                if total_allocated > hq_available:
+                    over_allocated_skus.append(sku)
+
+            if over_allocated_skus:
+                st.error(
+                    f"❌ Cannot submit — {len(over_allocated_skus)} SKU(s) are over-allocated: "
+                    f"{', '.join(over_allocated_skus)}. Reduce quantities before submitting."
+                )
+
+            # Submit button — disabled if any SKU is over-allocated
             submitted = st.form_submit_button(
-                "✅ Submit Allocations", use_container_width=True)
+                "✅ Submit Allocations",
+                use_container_width=True,
+                disabled=bool(over_allocated_skus)
+            )
             if submitted:
                 st.session_state.allocations_submitted = True
+
+        # --- ALLOCATION CONFIRMATION SUMMARY ---
+        # Shown after submit so nothing about unassigned HQ stock is silent.
+        if st.session_state.get("allocations_submitted"):
+            st.divider()
+            st.subheader("📋 Allocation Summary")
+
+            summary_rows = []
+            any_unassigned = False
+
+            for sku in sorted(allocation_candidates.keys()):
+                info = allocation_candidates[sku]
+                hq_available = int(info['hq_qty'])
+                allocated_by_store = {
+                    store_code: st.session_state.hq_allocations.get(
+                        sku, {}).get(store_code, 0)
+                    for store_code in selected_stores
+                    if store_code in info['stores']
+                }
+                total_allocated = sum(allocated_by_store.values())
+                unassigned = hq_available - total_allocated
+
+                # Stores with demand that received nothing
+                skipped_stores = [
+                    s for s in info['stores']
+                    if allocated_by_store.get(s, 0) == 0
+                ]
+
+                if unassigned > 0:
+                    any_unassigned = True
+
+                summary_rows.append({
+                    'SKU': sku,
+                    'HQ Available': hq_available,
+                    'Total Allocated': total_allocated,
+                    'Unassigned': unassigned,
+                    'Stores Getting 0 (→ Full Vendor Order)': ', '.join(skipped_stores) if skipped_stores else '—'
+                })
+
+            summary_df = pd.DataFrame(summary_rows)
+            st.dataframe(summary_df, width='stretch', hide_index=True)
+
+            if any_unassigned:
+                st.warning(
+                    "⚠️ Some HQ stock above is unassigned. Stores listed in the last column "
+                    "received no allocation and will order their full need from the vendor instead, "
+                    "even though HQ has stock available. If this isn't intentional, scroll up and "
+                    "allocate before generating downloads."
+                )
+            else:
+                st.success(
+                    "✅ All available HQ stock has been assigned across stores.")
 
     tabs = st.tabs(selected_stores)
 
@@ -459,76 +582,16 @@ if catalog_file and rules_matrix is not None and selected_stores:
         long_name = inv_store_map[short_name]
         with tabs[i]:
             if long_name in df_master.columns:
-                # 1. Rules & Merge
-                lookup_cols = ['SKU', 'Order In Quantities',
-                               f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
-                valid_lookup = [
-                    c for c in lookup_cols if c in rules_matrix.columns]
-                store_rules = rules_matrix[valid_lookup].copy().rename(columns={
-                    f'{short_name}_DNO': 'DNO',
-                    f'{short_name}_Min': 'Min',
-                    f'{short_name}_Max': 'Max'
-                })
-
-                store_inv = df_master[[
-                    'SKU', 'GTIN', 'Item Name', 'Default Unit Cost', long_name, hq_col
-                ]].copy().rename(columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'})
-
-                data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-                data = data.fillna({
-                    'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
-                    'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
-                })
-                data['DNO'] = data['DNO'].astype(bool)
-
-                # 2. Split Trigger Logic
-                data['Effective_Min'] = data['Min']
-                data['Needs_Order'] = np.where(
-                    data['Order In Quantities'] == 1,
-                    (data['Current_Inv'] < data['Max']),
-                    (data['Current_Inv'] < data['Effective_Min'])
+                data = compute_store_order(
+                    short_name, df_master, rules_matrix, hq_col,
+                    hq_threshold, allocation_candidates,
+                    st.session_state.get("hq_allocations", {})
                 )
-                data['Needs_Order'] = data['Needs_Order'] & (
-                    data['DNO'] == False)
-                data['Units_Needed_To_Max'] = np.where(
-                    data['Needs_Order'], data['Max'] - data['Current_Inv'], 0
-                )
-                data['Total_Units_Needed'] = np.ceil(
-                    np.maximum(data['Units_Needed_To_Max'], 0) /
-                    data['Order In Quantities']
-                ) * data['Order In Quantities']
 
-                # 3. HQ Transfer UI with allocation awareness
+                # HQ Transfer UI
                 st.subheader(f"🚛 HQ Transfer List: {short_name}")
                 st.caption(
                     f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). Delete a row or set Qty to 0 to move it to the Vendor Order.")
-
-                # Apply user allocation if it exists
-                # **Use nested dict structure: allocs[sku][store_code]**
-                data['Allocated_HQ'] = data['SKU'].apply(
-                    lambda sku: st.session_state.hq_allocations.get(
-                        sku, {}).get(short_name, 0)
-                    if "hq_allocations" in st.session_state else 0
-                )
-
-                # Mark which SKUs are allocation candidates (conflict items)
-                data['Is_Allocation_Candidate'] = data['SKU'].isin(
-                    allocation_candidates.keys())
-
-                # Use allocated amount if specified, otherwise use suggested amount
-                # **EXCLUDE allocation candidates unless they've been allocated**
-                data['Suggested_HQ_Qty'] = np.where(
-                    (data['Total_Units_Needed'] > 0) & (
-                        data['Allocated_HQ'] > 0),
-                    data['Allocated_HQ'],  # If allocated, use that amount
-                    np.where(
-                        (data['Total_Units_Needed'] > 0) &
-                        (data['HQ_Qty'] > hq_threshold) &
-                        # Only suggest if NOT a conflict item
-                        (~data['Is_Allocation_Candidate']),
-                        data['Total_Units_Needed'], 0
-                    )
-                )
 
                 hq_display = data[data['Suggested_HQ_Qty'] > 0][[
                     'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty'
@@ -541,7 +604,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
                 # Display HQ Transfer Cost
                 if not ed_hq.empty:
-                    # Merge with original data to get unit cost
                     ed_hq_with_cost = ed_hq.merge(
                         data[['SKU', 'Default Unit Cost']], on='SKU', how='left'
                     )
@@ -564,12 +626,60 @@ if catalog_file and rules_matrix is not None and selected_stores:
                               f"{int(ed_hq['Transfer_Qty'].sum())}")
                     buf_hq = io.BytesIO()
                     with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
-                        ed_hq.to_excel(writer, index=False,
-                                       sheet_name='HQ_Transfer')
-                        # Format GTIN column as text to preserve leading zeros
-                        text_fmt = writer.book.add_format({'num_format': '@'})
-                        writer.sheets['HQ_Transfer'].set_column(
-                            'B:B', 20, text_fmt)
+                        workbook = writer.book
+                        worksheet = workbook.add_worksheet('HQ_Transfer')
+                        writer.sheets['HQ_Transfer'] = worksheet
+
+                        # --- Formats ---
+                        store_header_fmt = workbook.add_format({
+                            'bold': True,
+                            'font_size': 14,
+                            'align': 'left',
+                            'valign': 'vcenter',
+                        })
+                        col_header_fmt = workbook.add_format({
+                            'bold': True,
+                            'bg_color': '#D9E1F2',
+                            'border': 1,
+                            'align': 'center',
+                            'valign': 'vcenter',
+                        })
+                        cell_fmt = workbook.add_format({
+                            'border': 1,
+                            'valign': 'vcenter',
+                        })
+                        text_fmt = workbook.add_format({
+                            'num_format': '@',
+                            'border': 1,
+                            'valign': 'vcenter',
+                        })
+
+                        # --- Row 0: Store name header ---
+                        store_display_name = inv_store_map.get(
+                            short_name, short_name).replace('Current Quantity ', '')
+                        worksheet.write(
+                            0, 0, f"HQ Transfer — {store_display_name}", store_header_fmt)
+                        worksheet.set_row(0, 22)
+
+                        # --- Row 1: Column headers ---
+                        for col_idx, col_name in enumerate(ed_hq.columns):
+                            worksheet.write(
+                                1, col_idx, col_name, col_header_fmt)
+
+                        # --- Rows 2+: Data with borders ---
+                        gtin_col_idx = list(ed_hq.columns).index(
+                            'GTIN') if 'GTIN' in ed_hq.columns else None
+                        for row_idx, row in enumerate(ed_hq.itertuples(index=False), start=2):
+                            for col_idx, value in enumerate(row):
+                                fmt = text_fmt if col_idx == gtin_col_idx else cell_fmt
+                                worksheet.write(row_idx, col_idx, value, fmt)
+
+                        # --- Column widths ---
+                        worksheet.set_column('A:A', 12)   # SKU
+                        worksheet.set_column('B:B', 20)   # GTIN
+                        worksheet.set_column('C:C', 40)   # Item Name
+                        worksheet.set_column('D:F', 14)   # Qty columns
+
                     st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
                                        file_name=f"{date_str}_{selected_vendor}_HQ_{short_name}.xlsx",
                                        key=f"dl_hq_{short_name}")
@@ -633,92 +743,30 @@ if catalog_file and rules_matrix is not None and selected_stores:
     st.subheader("📊 Consolidated Order Summary")
     st.caption("Total items being ordered across all stores (vendor + HQ)")
 
-    # Aggregate all orders across stores
+    # Aggregate all orders across stores — reuse compute_store_order, no duplicate logic
     all_orders = []
 
-    for i, short_name in enumerate(selected_stores):
+    for short_name in selected_stores:
         long_name = inv_store_map[short_name]
-        if long_name in df_master.columns:
-            # Rebuild store data (same as tabs)
-            lookup_cols = ['SKU', 'Order In Quantities',
-                           f'{short_name}_DNO', f'{short_name}_Min', f'{short_name}_Max']
-            valid_lookup = [
-                c for c in lookup_cols if c in rules_matrix.columns]
-            store_rules = rules_matrix[valid_lookup].copy().rename(columns={
-                f'{short_name}_DNO': 'DNO',
-                f'{short_name}_Min': 'Min',
-                f'{short_name}_Max': 'Max'
-            })
+        if long_name not in df_master.columns:
+            continue
 
-            store_inv = df_master[[
-                'SKU', 'GTIN', 'Item Name', 'Default Unit Cost', long_name, hq_col
-            ]].copy().rename(columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'})
+        data = compute_store_order(
+            short_name, df_master, rules_matrix, hq_col,
+            hq_threshold, allocation_candidates,
+            st.session_state.get("hq_allocations", {})
+        )
 
-            data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-            data = data.fillna({
-                'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
-                'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
-            })
-            data['DNO'] = data['DNO'].astype(bool)
+        order_items = data[data['Total_Units_Needed'] > 0][[
+            'SKU', 'GTIN', 'Item Name', 'Order In Quantities',
+            'Vendor_Cases', 'Suggested_HQ_Qty', 'Default Unit Cost'
+        ]].copy()
+        order_items['Store'] = short_name
+        order_items['Vendor_Units'] = order_items['Vendor_Cases'] * \
+            order_items['Order In Quantities']
+        order_items['HQ_Units'] = order_items['Suggested_HQ_Qty']
 
-            data['Effective_Min'] = data['Min']
-            data['Needs_Order'] = np.where(
-                data['Order In Quantities'] == 1,
-                (data['Current_Inv'] < data['Max']),
-                (data['Current_Inv'] < data['Effective_Min'])
-            )
-            data['Needs_Order'] = data['Needs_Order'] & (data['DNO'] == False)
-            data['Units_Needed_To_Max'] = np.where(
-                data['Needs_Order'], data['Max'] - data['Current_Inv'], 0
-            )
-            data['Total_Units_Needed'] = np.ceil(
-                np.maximum(data['Units_Needed_To_Max'], 0) /
-                data['Order In Quantities']
-            ) * data['Order In Quantities']
-
-            # Apply allocation if exists
-            # **Use nested dict structure: allocs[sku][store_code]**
-            data['Allocated_HQ'] = data['SKU'].apply(
-                lambda sku: st.session_state.hq_allocations.get(
-                    sku, {}).get(short_name, 0)
-                if "hq_allocations" in st.session_state else 0
-            )
-
-            # Mark which SKUs are allocation candidates (conflict items)
-            data['Is_Allocation_Candidate'] = data['SKU'].isin(
-                allocation_candidates.keys())
-
-            # Use allocated amount if specified, otherwise use suggested amount
-            # **EXCLUDE allocation candidates unless they've been allocated**
-            data['Suggested_HQ_Qty'] = np.where(
-                (data['Total_Units_Needed'] > 0) & (data['Allocated_HQ'] > 0),
-                data['Allocated_HQ'],  # If allocated, use that amount
-                np.where(
-                    (data['Total_Units_Needed'] > 0) &
-                    (data['HQ_Qty'] > hq_threshold) &
-                    # Only suggest if NOT a conflict item
-                    (~data['Is_Allocation_Candidate']),
-                    data['Total_Units_Needed'], 0
-                )
-            )
-
-            # Vendor orders
-            data['Vendor_Units'] = (
-                data['Total_Units_Needed'] - data['Suggested_HQ_Qty']).clip(lower=0)
-            data['Vendor_Cases'] = np.ceil(
-                data['Vendor_Units'] / data['Order In Quantities']
-            )
-
-            # Collect all orders (both vendor and HQ)
-            order_items = data[data['Total_Units_Needed'] > 0][[
-                'SKU', 'GTIN', 'Item Name', 'Order In Quantities', 'Vendor_Cases', 'Suggested_HQ_Qty', 'Default Unit Cost'
-            ]].copy()
-            order_items['Store'] = short_name
-            order_items['Vendor_Units'] = order_items['Vendor_Cases'] * \
-                order_items['Order In Quantities']
-            order_items['HQ_Units'] = order_items['Suggested_HQ_Qty']
-
-            all_orders.append(order_items)
+        all_orders.append(order_items)
 
     if all_orders:
         combined_orders = pd.concat(all_orders, ignore_index=True)
