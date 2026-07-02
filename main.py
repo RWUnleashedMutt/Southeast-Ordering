@@ -292,10 +292,34 @@ if catalog_file and rules_matrix is not None and selected_stores:
             np.maximum(data['Max'] - data['Current_Inv'], 0),
             0
         )
-        data['Total_Units_Needed'] = np.ceil(
-            np.maximum(data['Units_Needed_To_Max'], 0) /
+        # Round to the nearest whole case rather than always rounding up —
+        # e.g. needing 25 units at a 12-pack lands on 2 cases (24, close to
+        # Max) instead of 3 cases (36, well past Max). Still guarantees at
+        # least 1 case whenever an order is actually triggered, so small
+        # Min/Max windows relative to case size (intentional low-velocity
+        # SKUs) behave exactly as before.
+        raw_cases = data['Units_Needed_To_Max'] / data['Order In Quantities']
+        rounded_cases = np.floor(raw_cases + 0.5)  # round-half-up
+        rounded_cases = np.where(
+            (data['Units_Needed_To_Max'] > 0) & (rounded_cases < 1),
+            1, rounded_cases
+        )
+        data['Total_Units_Needed'] = rounded_cases * \
             data['Order In Quantities']
-        ) * data['Order In Quantities']
+
+        # Safety net: rounding to the nearest case can occasionally round
+        # DOWN in a way that, combined with a narrow Min/Max window, leaves
+        # post-order stock below Min. Never let that happen — bump up one
+        # more case if the rounded order wouldn't clear Min.
+        would_understock = data['Needs_Order'] & (
+            (data['Current_Inv'] + data['Total_Units_Needed']
+             ) < data['Effective_Min']
+        )
+        data['Total_Units_Needed'] = np.where(
+            would_understock,
+            data['Total_Units_Needed'] + data['Order In Quantities'],
+            data['Total_Units_Needed']
+        )
 
         # HQ allocation awareness
         data['Allocated_HQ'] = data['SKU'].apply(
@@ -431,12 +455,16 @@ if catalog_file and rules_matrix is not None and selected_stores:
             if sku not in st.session_state.hq_allocations:
                 st.session_state.hq_allocations[sku] = {}
 
-        # Use a form to batch all allocation inputs — no reruns until submit
         st.write("**Allocate HQ Qty by Store:**")
         st.info(
-            "👆 Make all allocation changes below, then click Submit. No reruns until you're ready!")
+            "👆 \"Remaining\" updates live as you type. Once everything looks "
+            "right, click **Push Allocations** to apply it to the store tabs below.")
 
-        with st.form("allocation_form"):
+        # Use a fragment so editing an allocation only reruns this section —
+        # not the full catalog/rules/store-tab pipeline — and "Remaining"
+        # updates live as you type instead of waiting for a submit.
+        @st.fragment
+        def render_allocation_inputs():
             # Build allocation inputs and track totals dynamically
             for sku in sorted(allocation_candidates.keys()):
                 info = allocation_candidates[sku]
@@ -448,39 +476,76 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
                 st.markdown(f"**{sku}** — {item_name} (Case Pack: {oiq})")
 
-                alloc_cols = st.columns(len(selected_stores) + 1)
+                # Only the stores that actually need this SKU get an input.
+                # The input stretches to fill its column instead of a fixed
+                # pixel width, so it no longer leaves a gap before the next
+                # store — the column itself is already comfortably wide
+                # enough (page is in wide mode, 4 per row) to keep the
+                # native +/- stepper arrows visible.
+                relevant_stores = [
+                    s for s in selected_stores if s in info['stores']]
+                cards_per_row = 4
 
-                # Calculate total allocated for this SKU
                 total_allocated = 0
-                for col_idx, store_code in enumerate(selected_stores):
-                    if store_code in info['stores']:
-                        with alloc_cols[col_idx]:
+                for row_start in range(0, len(relevant_stores), cards_per_row):
+                    row_stores = relevant_stores[row_start:row_start + cards_per_row]
+                    row_cols = st.columns(cards_per_row)
+                    for col, store_code in zip(row_cols, row_stores):
+                        with col:
                             # **Use nested structure: allocs[sku][store_code]**
                             if store_code not in st.session_state.hq_allocations[sku]:
                                 st.session_state.hq_allocations[sku][store_code] = 0
 
-                            # Ensure hq_available is positive before using as max_value
-                            max_alloc = max(int(hq_available), 0)
+                            # Look up demand first so the input can't be
+                            # incremented past what this store actually
+                            # needs — no reason to push more HQ stock at a
+                            # store than it's asking for, even if HQ has
+                            # more available overall.
+                            store_demand_info = demand_map.get(store_code, {})
+                            current_inv = int(
+                                store_demand_info.get('current_inv', 0))
+                            demand = int(store_demand_info.get('demand', 0))
+
+                            max_alloc = max(
+                                min(int(hq_available), demand), 0)
+
+                            # Clamp any previously-stored value down to the
+                            # new tighter max so Streamlit doesn't error on
+                            # value > max_value
+                            if st.session_state.hq_allocations[sku][store_code] > max_alloc:
+                                st.session_state.hq_allocations[sku][store_code] = max_alloc
 
                             allocated = st.number_input(
                                 f"{store_code}", 0, max_alloc,
                                 value=st.session_state.hq_allocations[sku][store_code],
                                 step=oiq,
-                                key=f"alloc_{sku}_{store_code}"
+                                key=f"alloc_{sku}_{store_code}",
+                                width="stretch"
                             )
                             st.session_state.hq_allocations[sku][store_code] = allocated
                             total_allocated += allocated
 
-                            # Show current inventory and demand in small text
-                            store_demand_info = demand_map.get(store_code, {})
-                            current_inv = int(
-                                store_demand_info.get('current_inv', 0))
-                            demand = int(store_demand_info.get('demand', 0))
-                            st.caption(f"Has: {current_inv} | Needs: {demand}")
+                            # Has/Needs directly under its own input, filling
+                            # the same width so it lines up with the box
+                            # above it rather than trailing off to one side
+                            st.markdown(
+                                f"<div style='font-size:14px; width:100%; "
+                                f"margin-top:-6px;'>Has: <b>{current_inv}</b>"
+                                f" &nbsp;|&nbsp; Needs: <b>{demand}</b></div>",
+                                unsafe_allow_html=True
+                            )
 
-                # Show remaining in last column
+                    # Breathing room between wrapped rows for SKUs with
+                    # more stores than fit in one row
+                    if row_start + cards_per_row < len(relevant_stores):
+                        st.markdown(
+                            "<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+
+                # Show remaining on its own row below all store inputs —
+                # this recalculates live now, no submit needed to see it
                 remaining = hq_available - total_allocated
-                with alloc_cols[-1]:
+                rem_col = st.columns([3, 1])[1]
+                with rem_col:
                     st.metric(
                         "Remaining",
                         remaining,
@@ -511,18 +576,28 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
             if over_allocated_skus:
                 st.error(
-                    f"❌ Cannot submit — {len(over_allocated_skus)} SKU(s) are over-allocated: "
-                    f"{', '.join(over_allocated_skus)}. Reduce quantities before submitting."
+                    f"❌ Cannot push — {len(over_allocated_skus)} SKU(s) are over-allocated: "
+                    f"{', '.join(over_allocated_skus)}. Reduce quantities before pushing."
                 )
 
-            # Submit button — disabled if any SKU is over-allocated
-            submitted = st.form_submit_button(
-                "✅ Submit Allocations",
-                use_container_width=True,
+            # Disabling this is safe here (unlike the old form_submit_button):
+            # a fragment reruns itself on every number_input edit, so the
+            # disabled state is always recalculated fresh — no stuck/frozen
+            # button like the form version had.
+            pushed = st.button(
+                "🚀 Push Allocations",
+                width="stretch",
                 disabled=bool(over_allocated_skus)
             )
-            if submitted:
+            if pushed and not over_allocated_skus:
                 st.session_state.allocations_submitted = True
+                # Full-app rerun (st.rerun's default scope) so the HQ
+                # Transfer / Vendor Order / Consolidated Summary sections
+                # below — which live outside this fragment — pick up the
+                # new allocations immediately.
+                st.rerun()
+
+        render_allocation_inputs()
 
         # --- ALLOCATION CONFIRMATION SUMMARY ---
         # Shown after submit so nothing about unassigned HQ stock is silent.
@@ -681,7 +756,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
                         worksheet.set_column('D:F', 14)   # Qty columns
 
                     st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
-                                       file_name=f"{date_str}_{selected_vendor}_HQ_{short_name}.xlsx",
+                                       file_name=f"{short_name}_{date_str}_HQ_{selected_vendor}.xlsx",
                                        key=f"dl_hq_{short_name}")
 
                 st.divider()
@@ -702,9 +777,10 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     frozen_mask = order_summary['Item Name'].str.startswith(
                         'FRZN', na=False)
 
-                    for label, df_type in [
-                        ("📦 Dry Order", order_summary[~frozen_mask]),
-                        ("❄️ Frozen Order", order_summary[frozen_mask])
+                    for label, file_label, df_type in [
+                        ("📦 Dry Order", "Dry", order_summary[~frozen_mask]),
+                        ("❄️ Frozen Order", "Frozen",
+                         order_summary[frozen_mask])
                     ]:
                         st.markdown(f"#### {label}")
                         if not df_type.empty:
@@ -716,7 +792,16 @@ if catalog_file and rules_matrix is not None and selected_stores:
                             st.metric(f"{label} Cost", f"${cost:,.2f}")
 
                             export_df = ed_df[[
-                                'GTIN', 'Item Name', 'Order (Cases)']].copy()
+                                'GTIN', 'Item Name', 'Order (Cases)', 'Case Pack']].copy()
+                            export_df['Order (Cases)'] = export_df.apply(
+                                lambda r: f"{int(r['Order (Cases)'])} case" +
+                                ('s' if int(r['Order (Cases)']) != 1 else '')
+                                if r['Case Pack'] > 1 else str(int(r['Order (Cases)'])),
+                                axis=1
+                            )
+                            export_df = export_df.drop(columns=['Case Pack'])
+                            export_df = export_df.rename(
+                                columns={'Order (Cases)': 'Order'})
                             buf = io.BytesIO()
                             with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
                                 export_df.to_excel(
@@ -728,7 +813,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
                                 writer.sheets['Vendor_Order'].set_column(
                                     'B:B', 40)
                             st.download_button(f"📥 Download {label}", buf.getvalue(),
-                                               file_name=f"{date_str}_{label}_{short_name}.xlsx",
+                                               file_name=f"{short_name}_{date_str}_{file_label}.xlsx",
                                                key=f"dl_{label}_{short_name}")
                         else:
                             st.write("No items in this category.")
