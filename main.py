@@ -13,7 +13,9 @@ SCOPES = [
 ]
 
 SHEET_IDS = {
+    "HQ Non Southeast Items": "1W-AGqIXwcqL7clDHad43hFmpPrrXzNUDYC4-dVGpngo",
     "Adored Beast": "1HwOxpAzI_HlntVVfOqxBVAWDy7cznPxxhUqOR5cy6ng",
+    "Ark Naturals": "1hgs38gm96v_ZansdVJTdr4JEsK-6TTarlbuBIr2V9C0",
     "Aroma Paws": "1fTvxu-y3rVpvxkt8elR1bZMECReblLE0zmYQDr1ePPg",
     "Bradley Caldwell": "1eqENDXTdDJVKdos-VUXYNYMNM806rNcDrv63Q654nyc",
     "Brilliant Salmon Oil": "1ZJg6pPEf502MZVGCvuQcxDFHXMhWep0xdyA4xlj92aw",
@@ -32,13 +34,16 @@ SHEET_IDS = {
     "Kennel Master": "1YgbCH_UxFZYAKnyJRki1ReNIdgqyUHtPS8gztUbpJaQ",
     "Nordic Naturals": "1QvApqLGh0uFcRbbNLkpxcyqMdihM_zrc2cvvJEJ9YEg",
     "PAW": "1pWnAVNS2oRb38Dv1oXR2mwhdQbVCSG2tnUVCM-5SrTo",
+    "Phillips": "1AyaU_YubXM5Qx88Deo7Nj3OFUBTeIzx4VUXawe_YeWI",
     "Playology": "1crFl1pFzMluFAcUTuMcrTaAJGETtua3iU8L8HIELny8",
     "Polka Dog": "1JUFN_ErS6FXUKD9gv_RzccxJplwpEDiaX3Am4LW0shw",
     "SE": "1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ",
     "Trueblue": "1vvMahz0JVn-_mO_Dry5amhebKbc_T_hAzVJYarP8o-U",
     "Tuesdays Natural Dog": "1f_iWF48FflsFBlVkR3P5Sk49Q87Q8Fpl8tklKYKsHtk",
     "Unique": "1Cf40Nm57h2gm_le_0gOV-jHfSpHjJHb6F8-0wP1cA0s",
-    "Zenta": "1x1mH8ldOwNLXOLtf8RXhSHQliOUO9mNZmHtliTpPWKw",
+    "Wild Meadow Farms": "1NOkBS71fYQSOtIs_cwWMGmn0WDJK8YfO51GVyVxaMEg",
+    "Winnie Lou": "1sFhwEVHFhAZI9mgVLCy1EFUR3He76ZrJFEJP1BiH2gQ",
+    "Zenta": "1x1mH8ldOwNLXOLtf8RXhSHQliOUO9mNZmHtliTpPWKw"
 }
 
 store_map = {
@@ -679,6 +684,12 @@ if catalog_file and rules_matrix is not None and selected_stores:
                 ed_hq = st.data_editor(hq_display, use_container_width=True,
                                        hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
 
+                # Rows added via the dynamic editor start out entirely blank
+                # (NaN in every column) until the person fills them in. NaN
+                # breaks int()/xlsxwriter/etc. downstream, so drop any row
+                # that's missing its SKU before doing anything else with it.
+                ed_hq = ed_hq[ed_hq['SKU'].notna()].copy()
+
                 # Display HQ Transfer Cost
                 if not ed_hq.empty:
                     ed_hq_with_cost = ed_hq.merge(
@@ -749,7 +760,17 @@ if catalog_file and rules_matrix is not None and selected_stores:
                         for row_idx, row in enumerate(ed_hq.itertuples(index=False), start=2):
                             for col_idx, value in enumerate(row):
                                 fmt = text_fmt if col_idx == gtin_col_idx else cell_fmt
-                                worksheet.write(row_idx, col_idx, value, fmt)
+                                # Blank rows added via the dynamic data_editor
+                                # can still leave individual cells (not just
+                                # SKU) as NaN — xlsxwriter's write_number()
+                                # rejects NaN/inf outright, so route those
+                                # through write_blank() instead of write().
+                                if pd.isna(value):
+                                    worksheet.write_blank(
+                                        row_idx, col_idx, None, fmt)
+                                else:
+                                    worksheet.write(
+                                        row_idx, col_idx, value, fmt)
 
                         # --- Column widths ---
                         worksheet.set_column('A:A', 12)   # SKU
@@ -789,6 +810,15 @@ if catalog_file and rules_matrix is not None and selected_stores:
                             ed_df = st.data_editor(df_type, use_container_width=True,
                                                    hide_index=True, num_rows="dynamic",
                                                    key=f"vend_{label}_{short_name}")
+
+                            # Same NaN guard as the HQ editor above — a
+                            # freshly-added blank row must be dropped before
+                            # any int()/formatting/cost math touches it.
+                            ed_df = ed_df[ed_df['SKU'].notna()].copy()
+                            if ed_df.empty:
+                                st.write("No items in this category.")
+                                continue
+
                             cost = (ed_df['Total Units'] *
                                     ed_df['Default Unit Cost']).sum()
                             st.metric(f"{label} Cost", f"${cost:,.2f}")
