@@ -22,6 +22,7 @@ SHEET_IDS = {
     "Butchers Block": "1nDtvvDVu9tAzR2iDB4uMpUG3rcN3Fm_v09WJw3jvbJI",
     "Canine Caviar": "1TJXe9V_aF1A1wm_O9XK_iWJNU119iH3ZBBorUlX_0ss",
     "Colorado Pet Treats": "1U4nQGJvgyPWLST96Y6a4yrgJ2jGGicS6p4f7jesL8p8",
+    "Comfy Cone": "15SuKA1HiSOZDs78x1ZgQOG0cUXnZ-kBJyKsUG59btQY",
     "Dexy Paws": "1fux791xEUU9shk2kyyFK6B-f6sjJlx3zser-jq9oHYU",
     "Evangers": "1Lg9-ar14KHJDgWjFGqFbhuh-1-OM_BpA3ABIaoWe_gE",
     "Fluff & Tuff": "1nGWM9Lt34e3vpqaETjPeMVsCTKVC9kIEQ3VVx1mEUqY",
@@ -32,6 +33,7 @@ SHEET_IDS = {
     "Homeopet": "1O35i1E_1lWxOkTJTvaURW2_qwlVO2YGaoBRfFvcstjE",
     "InClover": "1GJX-rqphRYAHM50HKrXhE3qG3ZUeB9kP0njwcuM56co",
     "Kennel Master": "1YgbCH_UxFZYAKnyJRki1ReNIdgqyUHtPS8gztUbpJaQ",
+    "Multi Pet": "1KjTgp4NCL5EXM7kKUrI-FIfVzvh9UYXBgz3o24RkeXU",
     "Nordic Naturals": "1QvApqLGh0uFcRbbNLkpxcyqMdihM_zrc2cvvJEJ9YEg",
     "PAW": "1pWnAVNS2oRb38Dv1oXR2mwhdQbVCSG2tnUVCM-5SrTo",
     "Phillips": "1AyaU_YubXM5Qx88Deo7Nj3OFUBTeIzx4VUXawe_YeWI",
@@ -43,7 +45,7 @@ SHEET_IDS = {
     "Unique": "1Cf40Nm57h2gm_le_0gOV-jHfSpHjJHb6F8-0wP1cA0s",
     "Wild Meadow Farms": "1NOkBS71fYQSOtIs_cwWMGmn0WDJK8YfO51GVyVxaMEg",
     "Winnie Lou": "1sFhwEVHFhAZI9mgVLCy1EFUR3He76ZrJFEJP1BiH2gQ",
-    "Zenta": "1x1mH8ldOwNLXOLtf8RXhSHQliOUO9mNZmHtliTpPWKw"
+    "Zenta": "1x1mH8ldOwNLXOLtf8RXhSHQliOUO9mNZmHtliTpPWKw",
 }
 
 store_map = {
