@@ -30,6 +30,7 @@ SHEET_IDS = {
     'From The Field': '1wfs8bWVlUwJ1L6O518QkA8uheX0agIeSubnAO0-XYCo',
     'Front Porch Pets': '1CyW8rNNWzmYH9iqVRgN5iTWCiqgd-cJnrAJGktGS2a0',
     'Glacier Peak': '1iLFcfirV-2knXYGDqEE4721DtaRP_KFDgmtO-WsChMo',
+    'Go Cat': '1FO0eFavBINXOgHXTiJvhEf9lvYdHQsQEgusJ62RLGrc',
     'Great Lakes': '1ajpaKEq8XR-M_Wu9m_VOhMfmHkjjmOXYfGWENg8j02s',
     'Homeopet': '1O35i1E_1lWxOkTJTvaURW2_qwlVO2YGaoBRfFvcstjE',
     'InClover': '1GJX-rqphRYAHM50HKrXhE3qG3ZUeB9kP0njwcuM56co',
@@ -40,17 +41,17 @@ SHEET_IDS = {
     'Nordic Naturals': '1QvApqLGh0uFcRbbNLkpxcyqMdihM_zrc2cvvJEJ9YEg',
     'PAW': '1pWnAVNS2oRb38Dv1oXR2mwhdQbVCSG2tnUVCM-5SrTo',
     'Petmate': '1uOuHEjbHli6LVMsgDJbrfiuV1B9_QftMMeiqPH_C5bM',
-               'Phillips': '1AyaU_YubXM5Qx88Deo7Nj3OFUBTeIzx4VUXawe_YeWI',
-               'Playology': '1crFl1pFzMluFAcUTuMcrTaAJGETtua3iU8L8HIELny8',
-               'Polka Dog': '1JUFN_ErS6FXUKD9gv_RzccxJplwpEDiaX3Am4LW0shw',
-               'QT Dog': '1__-S-g-FdiuwKFyTZYq7fCJTwN3irMqHfvF99hrMhLY',
-               'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ',
-               'Trueblue': '1vvMahz0JVn-_mO_Dry5amhebKbc_T_hAzVJYarP8o-U',
-               'Tuesdays Natural Dog': '1f_iWF48FflsFBlVkR3P5Sk49Q87Q8Fpl8tklKYKsHtk',
-               'Unique': '1Cf40Nm57h2gm_le_0gOV-jHfSpHjJHb6F8-0wP1cA0s',
-               'Wild Meadow Farms': '1NOkBS71fYQSOtIs_cwWMGmn0WDJK8YfO51GVyVxaMEg',
-               'Winnie Lou': '1sFhwEVHFhAZI9mgVLCy1EFUR3He76ZrJFEJP1BiH2gQ',
-               'Zenta': '1x1mH8ldOwNLXOLtf8RXhSHQliOUO9mNZmHtliTpPWKw'
+    'Phillips': '1AyaU_YubXM5Qx88Deo7Nj3OFUBTeIzx4VUXawe_YeWI',
+    'Playology': '1crFl1pFzMluFAcUTuMcrTaAJGETtua3iU8L8HIELny8',
+    'Polka Dog': '1JUFN_ErS6FXUKD9gv_RzccxJplwpEDiaX3Am4LW0shw',
+    'QT Dog': '1__-S-g-FdiuwKFyTZYq7fCJTwN3irMqHfvF99hrMhLY',
+    'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ',
+    'Trueblue': '1vvMahz0JVn-_mO_Dry5amhebKbc_T_hAzVJYarP8o-U',
+    'Tuesdays Natural Dog': '1f_iWF48FflsFBlVkR3P5Sk49Q87Q8Fpl8tklKYKsHtk',
+    'Unique': '1Cf40Nm57h2gm_le_0gOV-jHfSpHjJHb6F8-0wP1cA0s',
+    'Wild Meadow Farms': '1NOkBS71fYQSOtIs_cwWMGmn0WDJK8YfO51GVyVxaMEg',
+    'Winnie Lou': '1sFhwEVHFhAZI9mgVLCy1EFUR3He76ZrJFEJP1BiH2gQ',
+    'Zenta': '1x1mH8ldOwNLXOLtf8RXhSHQliOUO9mNZmHtliTpPWKw'
 }
 
 store_map = {
