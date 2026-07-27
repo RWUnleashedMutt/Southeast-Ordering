@@ -290,12 +290,24 @@ if catalog_file and rules_matrix is not None and selected_stores:
             columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'}
         )
 
+        # Track which SKUs actually have a rules-matrix row (i.e. a real
+        # match) BEFORE the left-merge fills the gaps with defaults. Any
+        # catalog SKU with no rules row must never generate an order,
+        # regardless of its on-hand inventory. Without this, a SKU with no
+        # rules row implicitly gets Min=0/Max=0, and the order trigger for
+        # OIQ==1 items (Current_Inv < Max) evaluates to True whenever
+        # Current_Inv is negative — which happens in real Square exports
+        # from oversells/miscounts — silently generating an order for an
+        # item that was never supposed to be orderable at all.
+        has_rules_match = store_inv['SKU'].isin(set(store_rules['SKU']))
+
         data = pd.merge(store_inv, store_rules, on='SKU', how='left')
         data = data.fillna({
             'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
             'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
         })
         data['DNO'] = data['DNO'].astype(bool)
+        data['Has_Rules_Match'] = has_rules_match.values
 
         # Order trigger logic
         data['Effective_Min'] = data['Min']
@@ -304,7 +316,8 @@ if catalog_file and rules_matrix is not None and selected_stores:
             (data['Current_Inv'] < data['Max']),
             (data['Current_Inv'] < data['Effective_Min'])
         )
-        data['Needs_Order'] = data['Needs_Order'] & (data['DNO'] == False)
+        data['Needs_Order'] = data['Needs_Order'] & (
+            data['DNO'] == False) & data['Has_Rules_Match']
         data['Units_Needed_To_Max'] = np.where(
             data['Needs_Order'],
             np.maximum(data['Max'] - data['Current_Inv'], 0),
