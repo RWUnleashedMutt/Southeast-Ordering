@@ -47,6 +47,7 @@ SHEET_IDS = {
                'Playology': '1crFl1pFzMluFAcUTuMcrTaAJGETtua3iU8L8HIELny8',
                'Polka Dog': '1JUFN_ErS6FXUKD9gv_RzccxJplwpEDiaX3Am4LW0shw',
                'QT Dog': '1__-S-g-FdiuwKFyTZYq7fCJTwN3irMqHfvF99hrMhLY',
+               "Ruff Dawg": "1HpXiQn4RsNbdG0DtCKu9xjQ_W9Q9qa0DrDaFZiTroIw",
                'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ',
                'Trueblue': '1vvMahz0JVn-_mO_Dry5amhebKbc_T_hAzVJYarP8o-U',
                'Tuesdays Natural Dog': '1f_iWF48FflsFBlVkR3P5Sk49Q87Q8Fpl8tklKYKsHtk',
@@ -84,13 +85,11 @@ def clean_id(val):
 
 @st.cache_data
 def load_catalog(file) -> pd.DataFrame:
-    # Specify GTIN as string to preserve leading zeros
     dtype_dict = {'GTIN': str, 'SKU': str}
     df = pd.read_excel(file, header=1, dtype=dtype_dict)
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
     if 'GTIN' in df.columns:
-        # Keep GTIN as string and just strip whitespace
         df['GTIN'] = df['GTIN'].astype(str).str.strip()
     return df
 
@@ -118,13 +117,6 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
 
-    # Coerce columns to the correct types.
-    # _DNO columns are treated separately because Google Sheets can return booleans
-    # as native bool, integers (0/1), or text strings ('TRUE'/'FALSE') depending on
-    # cell formatting. Running pd.to_numeric on text strings produces NaN, which then
-    # causes fillna(0) + astype(bool) downstream to flip every 'FALSE' string to True
-    # — silently blocking all items from being ordered. The explicit map below handles
-    # all three formats safely.
     for col in df.columns:
         if col == 'SKU':
             continue
@@ -135,8 +127,6 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
             ).astype(bool)
         else:
             converted = pd.to_numeric(df[col], errors='coerce')
-            # Only replace if the conversion didn't turn everything to NaN
-            # (i.e. the column was actually numeric to begin with)
             if converted.notna().sum() > 0:
                 df[col] = converted
 
@@ -149,9 +139,9 @@ def init_session_defaults():
     defaults = {
         "rules_vendor": None,
         "rules_matrix": None,
-        "hq_allocations": {},  # Structure: {sku: {store_code: qty}}
-        "current_tab": 0,  # Track which store tab user is viewing
-        "allocations_submitted": False,  # Track if allocations have been locked in
+        "hq_allocations": {},
+        "current_tab": 0,
+        "allocations_submitted": False,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -160,7 +150,6 @@ def init_session_defaults():
 # --- APP ---
 st.set_page_config(page_title="Inventory & Ordering System", layout="wide")
 
-# Initialize session state FIRST (before any state access)
 init_session_defaults()
 
 st.title("📦 Southeast Inventory & Ordering")
@@ -178,12 +167,11 @@ with st.sidebar:
         options=["-- Select a Vendor --"] + list(SHEET_IDS.keys())
     )
 
-    # **Clear state when vendor changes**
     if selected_vendor != st.session_state.get("rules_vendor") and selected_vendor != "-- Select a Vendor --":
         st.session_state.rules_matrix = None
         st.session_state.rules_vendor = None
-        st.session_state.hq_allocations = {}  # Clear orphaned allocations
-        st.session_state.allocations_submitted = False  # Reset allocation submission
+        st.session_state.hq_allocations = {}
+        st.session_state.allocations_submitted = False
 
     load_rules_btn = st.button("📥 Load Rules from Google Sheets")
 
@@ -206,7 +194,7 @@ rules_matrix = None
 if selected_vendor == "-- Select a Vendor --":
     st.sidebar.info("Please select a vendor to load rules.")
 elif load_rules_btn:
-    load_rules_from_sheets.clear()  # Force fresh pull — bypasses TTL cache
+    load_rules_from_sheets.clear()
     with st.spinner(f"Loading rules matrix for **{selected_vendor}** from Google Sheets..."):
         try:
             rules_matrix = load_rules_from_sheets(selected_vendor)
@@ -216,7 +204,6 @@ elif load_rules_btn:
         except Exception as e:
             st.sidebar.error(f"❌ Failed to load rules: {e}")
 elif st.session_state.get("rules_matrix") is not None and st.session_state.get("rules_vendor") == selected_vendor:
-    # Restore already-loaded matrix if vendor hasn't changed
     rules_matrix = st.session_state["rules_matrix"]
     st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
 
@@ -224,11 +211,9 @@ elif st.session_state.get("rules_matrix") is not None and st.session_state.get("
 if catalog_file and rules_matrix is not None and selected_stores:
     df_master = load_catalog(catalog_file)
 
-    # Filter rules to only SKUs present in the catalog
     catalog_skus = set(df_master['SKU'].unique())
     rules_matrix = rules_matrix[rules_matrix['SKU'].isin(catalog_skus)].copy()
 
-    # Validate Order In Quantities (OIQ) to prevent division by zero
     invalid_oiq = rules_matrix[rules_matrix['Order In Quantities'] <= 0]
     if not invalid_oiq.empty:
         st.error(
@@ -245,14 +230,12 @@ if catalog_file and rules_matrix is not None and selected_stores:
     matched = len(rules_matrix['SKU'].unique())
     total = len(catalog_skus)
 
-    # Find SKUs that didn't match
     rules_skus = set(rules_matrix['SKU'].unique())
     unmatched_skus = catalog_skus - rules_skus
     unmatched_list = sorted(list(unmatched_skus))
 
     st.caption(f"✅ Matched {matched} of {total} catalog SKUs to rules.")
 
-    # Log unmatched SKUs to console
     if unmatched_skus:
         print(f"\n⚠️  WARNING: {len(unmatched_skus)} Unmatched SKUs found:")
         for sku in unmatched_list:
@@ -264,14 +247,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
     # --- CORE ORDER CALCULATION ---
     def compute_store_order(store_code, df_master, rules_matrix, hq_col,
                             hq_threshold, allocation_candidates, hq_allocations):
-        """
-        Single source of truth for all order calculations.
-        Returns a fully computed DataFrame for one store with columns:
-          SKU, GTIN, Item Name, Default Unit Cost, Current_Inv, HQ_Qty,
-          Order In Quantities, Min, Max, DNO,
-          Total_Units_Needed, Allocated_HQ, Is_Allocation_Candidate,
-          Suggested_HQ_Qty, Vendor_Units, Vendor_Cases
-        """
         long_name = inv_store_map[store_code]
 
         lookup_cols = ['SKU', 'Order In Quantities',
@@ -290,15 +265,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
             columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'}
         )
 
-        # Track which SKUs actually have a rules-matrix row (i.e. a real
-        # match) BEFORE the left-merge fills the gaps with defaults. Any
-        # catalog SKU with no rules row must never generate an order,
-        # regardless of its on-hand inventory. Without this, a SKU with no
-        # rules row implicitly gets Min=0/Max=0, and the order trigger for
-        # OIQ==1 items (Current_Inv < Max) evaluates to True whenever
-        # Current_Inv is negative — which happens in real Square exports
-        # from oversells/miscounts — silently generating an order for an
-        # item that was never supposed to be orderable at all.
         has_rules_match = store_inv['SKU'].isin(set(store_rules['SKU']))
 
         data = pd.merge(store_inv, store_rules, on='SKU', how='left')
@@ -309,7 +275,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
         data['DNO'] = data['DNO'].astype(bool)
         data['Has_Rules_Match'] = has_rules_match.values
 
-        # Order trigger logic
         data['Effective_Min'] = data['Min']
         data['Needs_Order'] = np.where(
             data['Order In Quantities'] == 1,
@@ -323,14 +288,8 @@ if catalog_file and rules_matrix is not None and selected_stores:
             np.maximum(data['Max'] - data['Current_Inv'], 0),
             0
         )
-        # Round to the nearest whole case rather than always rounding up —
-        # e.g. needing 25 units at a 12-pack lands on 2 cases (24, close to
-        # Max) instead of 3 cases (36, well past Max). Still guarantees at
-        # least 1 case whenever an order is actually triggered, so small
-        # Min/Max windows relative to case size (intentional low-velocity
-        # SKUs) behave exactly as before.
         raw_cases = data['Units_Needed_To_Max'] / data['Order In Quantities']
-        rounded_cases = np.floor(raw_cases + 0.5)  # round-half-up
+        rounded_cases = np.floor(raw_cases + 0.5)
         rounded_cases = np.where(
             (data['Units_Needed_To_Max'] > 0) & (rounded_cases < 1),
             1, rounded_cases
@@ -338,10 +297,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
         data['Total_Units_Needed'] = rounded_cases * \
             data['Order In Quantities']
 
-        # Safety net: rounding to the nearest case can occasionally round
-        # DOWN in a way that, combined with a narrow Min/Max window, leaves
-        # post-order stock below Min. Never let that happen — bump up one
-        # more case if the rounded order wouldn't clear Min.
         would_understock = data['Needs_Order'] & (
             (data['Current_Inv'] + data['Total_Units_Needed']
              ) < data['Effective_Min']
@@ -352,7 +307,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
             data['Total_Units_Needed']
         )
 
-        # HQ allocation awareness
         data['Allocated_HQ'] = data['SKU'].apply(
             lambda sku: hq_allocations.get(sku, {}).get(store_code, 0)
         )
@@ -382,10 +336,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
     # --- PRE-ALLOCATION: FIND HQ CONFLICT SKUS ---
     def get_allocation_candidates(df_master, rules_matrix, hq_col,
                                   selected_stores, hq_threshold):
-        """
-        Identify SKUs where total store demand exceeds HQ supply.
-        Accepts data as arguments so caching is based on actual content.
-        """
         store_needs_list = []
 
         for store_code in selected_stores:
@@ -393,7 +343,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
             if long_name not in df_master.columns:
                 continue
 
-            # Use compute_store_order with empty allocations to get raw demand
             data = compute_store_order(
                 store_code, df_master, rules_matrix, hq_col,
                 hq_threshold, allocation_candidates={}, hq_allocations={}
@@ -418,7 +367,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
             'Store': 'count'
         }).rename(columns={'Store': 'Store_Count'})
 
-        # Conflict = total demand exceeds HQ supply AND HQ has meaningful stock
         conflicts = sku_groups[
             (sku_groups['Units_Needed'] > sku_groups['HQ_Qty']) &
             (sku_groups['HQ_Qty'] > hq_threshold)
@@ -448,14 +396,12 @@ if catalog_file and rules_matrix is not None and selected_stores:
         df_master, rules_matrix, hq_col, selected_stores, hq_threshold
     )
 
-    # Show pre-allocation UI if there are candidates
     if allocation_candidates:
         st.divider()
         st.subheader("⚙️ HQ Allocation (Insufficient Stock)")
         st.caption(
             "Items below have more demand than HQ can supply. Allocate HQ qty to stores; unallocated stores will order from vendors.")
 
-        # Build allocation UI
         allocation_data = []
         for sku in sorted(allocation_candidates.keys()):
             info = allocation_candidates[sku]
@@ -477,11 +423,9 @@ if catalog_file and rules_matrix is not None and selected_stores:
         alloc_df = pd.DataFrame(allocation_data)
         st.dataframe(alloc_df, width='stretch', hide_index=True)
 
-        # Initialize session state for allocations
         if "hq_allocations" not in st.session_state:
             st.session_state.hq_allocations = {}
 
-        # Ensure all SKUs in candidates have a store dict
         for sku in allocation_candidates:
             if sku not in st.session_state.hq_allocations:
                 st.session_state.hq_allocations[sku] = {}
@@ -491,12 +435,8 @@ if catalog_file and rules_matrix is not None and selected_stores:
             "👆 \"Remaining\" updates live as you type. Once everything looks "
             "right, click **Push Allocations** to apply it to the store tabs below.")
 
-        # Use a fragment so editing an allocation only reruns this section —
-        # not the full catalog/rules/store-tab pipeline — and "Remaining"
-        # updates live as you type instead of waiting for a submit.
         @st.fragment
         def render_allocation_inputs():
-            # Build allocation inputs and track totals dynamically
             for sku in sorted(allocation_candidates.keys()):
                 info = allocation_candidates[sku]
                 item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
@@ -507,12 +447,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
                 st.markdown(f"**{sku}** — {item_name} (Case Pack: {oiq})")
 
-                # Only the stores that actually need this SKU get an input.
-                # The input stretches to fill its column instead of a fixed
-                # pixel width, so it no longer leaves a gap before the next
-                # store — the column itself is already comfortably wide
-                # enough (page is in wide mode, 4 per row) to keep the
-                # native +/- stepper arrows visible.
                 relevant_stores = [
                     s for s in selected_stores if s in info['stores']]
                 cards_per_row = 4
@@ -523,15 +457,9 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     row_cols = st.columns(cards_per_row)
                     for col, store_code in zip(row_cols, row_stores):
                         with col:
-                            # **Use nested structure: allocs[sku][store_code]**
                             if store_code not in st.session_state.hq_allocations[sku]:
                                 st.session_state.hq_allocations[sku][store_code] = 0
 
-                            # Look up demand first so the input can't be
-                            # incremented past what this store actually
-                            # needs — no reason to push more HQ stock at a
-                            # store than it's asking for, even if HQ has
-                            # more available overall.
                             store_demand_info = demand_map.get(store_code, {})
                             current_inv = int(
                                 store_demand_info.get('current_inv', 0))
@@ -540,9 +468,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
                             max_alloc = max(
                                 min(int(hq_available), demand), 0)
 
-                            # Clamp any previously-stored value down to the
-                            # new tighter max so Streamlit doesn't error on
-                            # value > max_value
                             if st.session_state.hq_allocations[sku][store_code] > max_alloc:
                                 st.session_state.hq_allocations[sku][store_code] = max_alloc
 
@@ -556,9 +481,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
                             st.session_state.hq_allocations[sku][store_code] = allocated
                             total_allocated += allocated
 
-                            # Has/Needs directly under its own input, filling
-                            # the same width so it lines up with the box
-                            # above it rather than trailing off to one side
                             st.markdown(
                                 f"<div style='font-size:14px; width:100%; "
                                 f"margin-top:-6px;'>Has: <b>{current_inv}</b>"
@@ -566,14 +488,10 @@ if catalog_file and rules_matrix is not None and selected_stores:
                                 unsafe_allow_html=True
                             )
 
-                    # Breathing room between wrapped rows for SKUs with
-                    # more stores than fit in one row
                     if row_start + cards_per_row < len(relevant_stores):
                         st.markdown(
                             "<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
 
-                # Show remaining on its own row below all store inputs —
-                # this recalculates live now, no submit needed to see it
                 remaining = hq_available - total_allocated
                 rem_col = st.columns([3, 1])[1]
                 with rem_col:
@@ -584,14 +502,12 @@ if catalog_file and rules_matrix is not None and selected_stores:
                         delta_color="inverse" if remaining >= 0 else "off"
                     )
 
-                # Warn if over-allocated
                 if remaining < 0:
                     st.error(
                         f"⚠️ Over-allocated by {abs(remaining)} units for SKU {sku}")
 
                 st.divider()
 
-            # Track whether any SKU is over-allocated
             over_allocated_skus = []
             for sku in sorted(allocation_candidates.keys()):
                 info = allocation_candidates[sku]
@@ -611,10 +527,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     f"{', '.join(over_allocated_skus)}. Reduce quantities before pushing."
                 )
 
-            # Disabling this is safe here (unlike the old form_submit_button):
-            # a fragment reruns itself on every number_input edit, so the
-            # disabled state is always recalculated fresh — no stuck/frozen
-            # button like the form version had.
             pushed = st.button(
                 "🚀 Push Allocations",
                 width="stretch",
@@ -622,16 +534,10 @@ if catalog_file and rules_matrix is not None and selected_stores:
             )
             if pushed and not over_allocated_skus:
                 st.session_state.allocations_submitted = True
-                # Full-app rerun (st.rerun's default scope) so the HQ
-                # Transfer / Vendor Order / Consolidated Summary sections
-                # below — which live outside this fragment — pick up the
-                # new allocations immediately.
                 st.rerun()
 
         render_allocation_inputs()
 
-        # --- ALLOCATION CONFIRMATION SUMMARY ---
-        # Shown after submit so nothing about unassigned HQ stock is silent.
         if st.session_state.get("allocations_submitted"):
             st.divider()
             st.subheader("📋 Allocation Summary")
@@ -651,7 +557,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
                 total_allocated = sum(allocated_by_store.values())
                 unassigned = hq_available - total_allocated
 
-                # Stores with demand that received nothing
                 skipped_stores = [
                     s for s in info['stores']
                     if allocated_by_store.get(s, 0) == 0
@@ -682,6 +587,182 @@ if catalog_file and rules_matrix is not None and selected_stores:
                 st.success(
                     "✅ All available HQ stock has been assigned across stores.")
 
+    @st.fragment
+    def render_store_tab(short_name, long_name, data, selected_vendor, date_str):
+        """
+        Renders the HQ Transfer + Vendor Order UI for one store tab.
+        Wrapped in @st.fragment so editing a data_editor or clicking a
+        download button in THIS store's tab only reruns this function —
+        not the catalog load, rules matrix, other store tabs, or the
+        consolidated summary below. `data` is passed in fresh each full
+        script run (from compute_store_order), and is only recomputed
+        inside this fragment when the fragment itself reruns via one of
+        its own widgets.
+        """
+        # HQ Transfer UI
+        st.subheader(f"🚛 HQ Transfer List: {short_name}")
+        st.caption(
+            f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). Delete a row or set Qty to 0 to move it to the Vendor Order.")
+
+        hq_display = data[data['Suggested_HQ_Qty'] > 0][[
+            'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty'
+        ]].copy()
+        hq_display.rename(
+            columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
+
+        ed_hq = st.data_editor(hq_display, use_container_width=True,
+                               hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
+
+        ed_hq = ed_hq[ed_hq['SKU'].notna()].copy()
+
+        if not ed_hq.empty:
+            ed_hq_with_cost = ed_hq.merge(
+                data[['SKU', 'Default Unit Cost']], on='SKU', how='left'
+            )
+            hq_cost = (
+                ed_hq_with_cost['Transfer_Qty'] * ed_hq_with_cost['Default Unit Cost']).sum()
+            st.metric("🏭 HQ Transfer Cost", f"${hq_cost:,.2f}")
+
+        hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
+        data['Final_HQ_Qty'] = data['SKU'].map(
+            lambda x: hq_final_map.get(x, 0))
+        data['Vendor_Units'] = (
+            data['Total_Units_Needed'] - data['Final_HQ_Qty']).clip(lower=0)
+        data['Vendor_Cases'] = np.ceil(
+            data['Vendor_Units'] / data['Order In Quantities']
+        )
+
+        if not ed_hq.empty:
+            st.metric("Total Transfer Units",
+                      f"{int(ed_hq['Transfer_Qty'].sum())}")
+            buf_hq = io.BytesIO()
+            with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
+                workbook = writer.book
+                worksheet = workbook.add_worksheet('HQ_Transfer')
+                writer.sheets['HQ_Transfer'] = worksheet
+
+                store_header_fmt = workbook.add_format({
+                    'bold': True,
+                    'font_size': 14,
+                    'align': 'left',
+                    'valign': 'vcenter',
+                })
+                col_header_fmt = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#D9E1F2',
+                    'border': 1,
+                    'align': 'center',
+                    'valign': 'vcenter',
+                })
+                cell_fmt = workbook.add_format({
+                    'border': 1,
+                    'valign': 'vcenter',
+                })
+                text_fmt = workbook.add_format({
+                    'num_format': '@',
+                    'border': 1,
+                    'valign': 'vcenter',
+                })
+
+                store_display_name = inv_store_map.get(
+                    short_name, short_name).replace('Current Quantity ', '')
+                worksheet.write(
+                    0, 0, f"HQ Transfer — {store_display_name}", store_header_fmt)
+                worksheet.set_row(0, 22)
+
+                for col_idx, col_name in enumerate(ed_hq.columns):
+                    worksheet.write(
+                        1, col_idx, col_name, col_header_fmt)
+
+                gtin_col_idx = list(ed_hq.columns).index(
+                    'GTIN') if 'GTIN' in ed_hq.columns else None
+                for row_idx, row in enumerate(ed_hq.itertuples(index=False), start=2):
+                    for col_idx, value in enumerate(row):
+                        fmt = text_fmt if col_idx == gtin_col_idx else cell_fmt
+                        if pd.isna(value):
+                            worksheet.write_blank(
+                                row_idx, col_idx, None, fmt)
+                        else:
+                            worksheet.write(
+                                row_idx, col_idx, value, fmt)
+
+                worksheet.set_column('A:A', 12)
+                worksheet.set_column('B:B', 20)
+                worksheet.set_column('C:C', 40)
+                worksheet.set_column('D:F', 14)
+
+            st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
+                               file_name=f"{short_name}_{date_str}_HQ_{selected_vendor}.xlsx",
+                               key=f"dl_hq_{short_name}")
+
+        st.divider()
+
+        # 5. Vendor Order UI
+        st.subheader(f"🛒 Vendor Orders: {short_name}")
+        order_summary = data[data['Vendor_Units'] > 0][[
+            'SKU', 'GTIN', 'Item Name', 'Vendor_Cases', 'Order In Quantities',
+            'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
+        ]].copy().reset_index(drop=True)
+        order_summary.rename(columns={
+            'Vendor_Cases': 'Order (Cases)',
+            'Order In Quantities': 'Case Pack',
+            'Vendor_Units': 'Total Units'
+        }, inplace=True)
+
+        if not order_summary.empty:
+            frozen_mask = order_summary['Item Name'].str.startswith(
+                'FRZN', na=False)
+
+            for label, file_label, df_type in [
+                ("📦 Dry Order", "Dry", order_summary[~frozen_mask]),
+                ("❄️ Frozen Order", "Frozen",
+                 order_summary[frozen_mask])
+            ]:
+                st.markdown(f"#### {label}")
+                if not df_type.empty:
+                    ed_df = st.data_editor(df_type, use_container_width=True,
+                                           hide_index=True, num_rows="dynamic",
+                                           key=f"vend_{label}_{short_name}")
+
+                    ed_df = ed_df[ed_df['SKU'].notna()].copy()
+                    if ed_df.empty:
+                        st.write("No items in this category.")
+                        continue
+
+                    cost = (ed_df['Total Units'] *
+                            ed_df['Default Unit Cost']).sum()
+                    st.metric(f"{label} Cost", f"${cost:,.2f}")
+
+                    export_df = ed_df[[
+                        'GTIN', 'Item Name', 'Order (Cases)', 'Case Pack']].copy()
+                    export_df['Order (Cases)'] = export_df.apply(
+                        lambda r: f"{int(r['Order (Cases)'])} case" +
+                        ('s' if int(r['Order (Cases)']) != 1 else '')
+                        if r['Case Pack'] > 1 else str(int(r['Order (Cases)'])),
+                        axis=1
+                    )
+                    export_df = export_df.drop(columns=['Case Pack'])
+                    export_df = export_df.rename(
+                        columns={'Order (Cases)': 'Order'})
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                        export_df.to_excel(
+                            writer, index=False, sheet_name='Vendor_Order')
+                        text_fmt = writer.book.add_format(
+                            {'num_format': '@'})
+                        writer.sheets['Vendor_Order'].set_column(
+                            'A:A', 20, text_fmt)
+                        writer.sheets['Vendor_Order'].set_column(
+                            'B:B', 40)
+                    st.download_button(f"📥 Download {label}", buf.getvalue(),
+                                       file_name=f"{short_name}_{date_str}_{file_label}.xlsx",
+                                       key=f"dl_{label}_{short_name}")
+                else:
+                    st.write("No items in this category.")
+        else:
+            st.success(
+                "No vendor order needed (Items may be covered by HQ).")
+
     tabs = st.tabs(selected_stores)
 
     for i, short_name in enumerate(selected_stores):
@@ -694,188 +775,9 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     st.session_state.get("hq_allocations", {})
                 )
 
-                # HQ Transfer UI
-                st.subheader(f"🚛 HQ Transfer List: {short_name}")
-                st.caption(
-                    f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). Delete a row or set Qty to 0 to move it to the Vendor Order.")
+                render_store_tab(short_name, long_name, data,
+                                 selected_vendor, date_str)
 
-                hq_display = data[data['Suggested_HQ_Qty'] > 0][[
-                    'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty'
-                ]].copy()
-                hq_display.rename(
-                    columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
-
-                ed_hq = st.data_editor(hq_display, use_container_width=True,
-                                       hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
-
-                # Rows added via the dynamic editor start out entirely blank
-                # (NaN in every column) until the person fills them in. NaN
-                # breaks int()/xlsxwriter/etc. downstream, so drop any row
-                # that's missing its SKU before doing anything else with it.
-                ed_hq = ed_hq[ed_hq['SKU'].notna()].copy()
-
-                # Display HQ Transfer Cost
-                if not ed_hq.empty:
-                    ed_hq_with_cost = ed_hq.merge(
-                        data[['SKU', 'Default Unit Cost']], on='SKU', how='left'
-                    )
-                    hq_cost = (
-                        ed_hq_with_cost['Transfer_Qty'] * ed_hq_with_cost['Default Unit Cost']).sum()
-                    st.metric("🏭 HQ Transfer Cost", f"${hq_cost:,.2f}")
-
-                # 4. Vendor Remainder
-                hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
-                data['Final_HQ_Qty'] = data['SKU'].map(
-                    lambda x: hq_final_map.get(x, 0))
-                data['Vendor_Units'] = (
-                    data['Total_Units_Needed'] - data['Final_HQ_Qty']).clip(lower=0)
-                data['Vendor_Cases'] = np.ceil(
-                    data['Vendor_Units'] / data['Order In Quantities']
-                )
-
-                if not ed_hq.empty:
-                    st.metric("Total Transfer Units",
-                              f"{int(ed_hq['Transfer_Qty'].sum())}")
-                    buf_hq = io.BytesIO()
-                    with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
-                        workbook = writer.book
-                        worksheet = workbook.add_worksheet('HQ_Transfer')
-                        writer.sheets['HQ_Transfer'] = worksheet
-
-                        # --- Formats ---
-                        store_header_fmt = workbook.add_format({
-                            'bold': True,
-                            'font_size': 14,
-                            'align': 'left',
-                            'valign': 'vcenter',
-                        })
-                        col_header_fmt = workbook.add_format({
-                            'bold': True,
-                            'bg_color': '#D9E1F2',
-                            'border': 1,
-                            'align': 'center',
-                            'valign': 'vcenter',
-                        })
-                        cell_fmt = workbook.add_format({
-                            'border': 1,
-                            'valign': 'vcenter',
-                        })
-                        text_fmt = workbook.add_format({
-                            'num_format': '@',
-                            'border': 1,
-                            'valign': 'vcenter',
-                        })
-
-                        # --- Row 0: Store name header ---
-                        store_display_name = inv_store_map.get(
-                            short_name, short_name).replace('Current Quantity ', '')
-                        worksheet.write(
-                            0, 0, f"HQ Transfer — {store_display_name}", store_header_fmt)
-                        worksheet.set_row(0, 22)
-
-                        # --- Row 1: Column headers ---
-                        for col_idx, col_name in enumerate(ed_hq.columns):
-                            worksheet.write(
-                                1, col_idx, col_name, col_header_fmt)
-
-                        # --- Rows 2+: Data with borders ---
-                        gtin_col_idx = list(ed_hq.columns).index(
-                            'GTIN') if 'GTIN' in ed_hq.columns else None
-                        for row_idx, row in enumerate(ed_hq.itertuples(index=False), start=2):
-                            for col_idx, value in enumerate(row):
-                                fmt = text_fmt if col_idx == gtin_col_idx else cell_fmt
-                                # Blank rows added via the dynamic data_editor
-                                # can still leave individual cells (not just
-                                # SKU) as NaN — xlsxwriter's write_number()
-                                # rejects NaN/inf outright, so route those
-                                # through write_blank() instead of write().
-                                if pd.isna(value):
-                                    worksheet.write_blank(
-                                        row_idx, col_idx, None, fmt)
-                                else:
-                                    worksheet.write(
-                                        row_idx, col_idx, value, fmt)
-
-                        # --- Column widths ---
-                        worksheet.set_column('A:A', 12)   # SKU
-                        worksheet.set_column('B:B', 20)   # GTIN
-                        worksheet.set_column('C:C', 40)   # Item Name
-                        worksheet.set_column('D:F', 14)   # Qty columns
-
-                    st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
-                                       file_name=f"{short_name}_{date_str}_HQ_{selected_vendor}.xlsx",
-                                       key=f"dl_hq_{short_name}")
-
-                st.divider()
-
-                # 5. Vendor Order UI
-                st.subheader(f"🛒 Vendor Orders: {short_name}")
-                order_summary = data[data['Vendor_Units'] > 0][[
-                    'SKU', 'GTIN', 'Item Name', 'Vendor_Cases', 'Order In Quantities',
-                    'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
-                ]].copy().reset_index(drop=True)
-                order_summary.rename(columns={
-                    'Vendor_Cases': 'Order (Cases)',
-                    'Order In Quantities': 'Case Pack',
-                    'Vendor_Units': 'Total Units'
-                }, inplace=True)
-
-                if not order_summary.empty:
-                    frozen_mask = order_summary['Item Name'].str.startswith(
-                        'FRZN', na=False)
-
-                    for label, file_label, df_type in [
-                        ("📦 Dry Order", "Dry", order_summary[~frozen_mask]),
-                        ("❄️ Frozen Order", "Frozen",
-                         order_summary[frozen_mask])
-                    ]:
-                        st.markdown(f"#### {label}")
-                        if not df_type.empty:
-                            ed_df = st.data_editor(df_type, use_container_width=True,
-                                                   hide_index=True, num_rows="dynamic",
-                                                   key=f"vend_{label}_{short_name}")
-
-                            # Same NaN guard as the HQ editor above — a
-                            # freshly-added blank row must be dropped before
-                            # any int()/formatting/cost math touches it.
-                            ed_df = ed_df[ed_df['SKU'].notna()].copy()
-                            if ed_df.empty:
-                                st.write("No items in this category.")
-                                continue
-
-                            cost = (ed_df['Total Units'] *
-                                    ed_df['Default Unit Cost']).sum()
-                            st.metric(f"{label} Cost", f"${cost:,.2f}")
-
-                            export_df = ed_df[[
-                                'GTIN', 'Item Name', 'Order (Cases)', 'Case Pack']].copy()
-                            export_df['Order (Cases)'] = export_df.apply(
-                                lambda r: f"{int(r['Order (Cases)'])} case" +
-                                ('s' if int(r['Order (Cases)']) != 1 else '')
-                                if r['Case Pack'] > 1 else str(int(r['Order (Cases)'])),
-                                axis=1
-                            )
-                            export_df = export_df.drop(columns=['Case Pack'])
-                            export_df = export_df.rename(
-                                columns={'Order (Cases)': 'Order'})
-                            buf = io.BytesIO()
-                            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                                export_df.to_excel(
-                                    writer, index=False, sheet_name='Vendor_Order')
-                                text_fmt = writer.book.add_format(
-                                    {'num_format': '@'})
-                                writer.sheets['Vendor_Order'].set_column(
-                                    'A:A', 20, text_fmt)
-                                writer.sheets['Vendor_Order'].set_column(
-                                    'B:B', 40)
-                            st.download_button(f"📥 Download {label}", buf.getvalue(),
-                                               file_name=f"{short_name}_{date_str}_{file_label}.xlsx",
-                                               key=f"dl_{label}_{short_name}")
-                        else:
-                            st.write("No items in this category.")
-                else:
-                    st.success(
-                        "No vendor order needed (Items may be covered by HQ).")
             else:
                 st.error(f"Missing column '{long_name}' in Catalog.")
 
@@ -884,7 +786,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
     st.subheader("📊 Consolidated Order Summary")
     st.caption("Total items being ordered across all stores (vendor + HQ)")
 
-    # Aggregate all orders across stores — reuse compute_store_order, no duplicate logic
     all_orders = []
 
     for short_name in selected_stores:
@@ -912,7 +813,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
     if all_orders:
         combined_orders = pd.concat(all_orders, ignore_index=True)
 
-        # Aggregate by SKU
         summary = combined_orders.groupby('SKU').agg({
             'GTIN': 'first',
             'Item Name': 'first',
@@ -922,14 +822,12 @@ if catalog_file and rules_matrix is not None and selected_stores:
             'Default Unit Cost': 'first'
         }).reset_index()
 
-        # Filter to only items with vendor orders (exclude HQ-only items)
         summary = summary[summary['Vendor_Units'] > 0].copy()
 
         summary['Total_Units'] = summary['Vendor_Units']
         summary['Total_Cost'] = summary['Total_Units'] * \
             summary['Default Unit Cost']
 
-        # Display summary
         display_summary = summary[[
             'SKU', 'GTIN', 'Item Name', 'Order In Quantities', 'Total_Units', 'Default Unit Cost', 'Total_Cost'
         ]].copy().rename(columns={
@@ -942,7 +840,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
         st.dataframe(display_summary,
                      use_container_width=True, hide_index=True)
 
-        # Metrics
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Total Items", len(summary))
@@ -952,7 +849,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
             st.metric("Total Order Value",
                       f"${summary['Total_Cost'].sum():,.2f}")
 
-        # Download consolidated file (vendor orders only)
         st.divider()
         export_summary = summary[[
             'GTIN', 'Item Name', 'Order In Quantities', 'Vendor_Units'
@@ -965,7 +861,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
         with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
             export_summary.to_excel(
                 writer, index=False, sheet_name='Consolidated_Order')
-            # Format GTIN column as text
             text_fmt = writer.book.add_format({'num_format': '@'})
             writer.sheets['Consolidated_Order'].set_column('A:A', 20, text_fmt)
             writer.sheets['Consolidated_Order'].set_column('B:B', 40)
@@ -977,7 +872,6 @@ if catalog_file and rules_matrix is not None and selected_stores:
             key="dl_consolidated"
         )
 
-# --- WELCOME / MISSING FILES STATE ---
 elif not selected_stores:
     st.warning(
         "Please select at least one store in the sidebar to begin processing.")
