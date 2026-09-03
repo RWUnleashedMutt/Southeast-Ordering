@@ -936,7 +936,7 @@ elif not catalog_file:
     with col_img:
         st.subheader("📸 Reference Settings")
         try:
-            st.image("./Data/Images/Export Example.png",
+            st.image("./assets/Export Example.png",
                      use_container_width=True, caption="Select the 'Filtered' option.")
         except:
             st.warning("Reference image not found.")

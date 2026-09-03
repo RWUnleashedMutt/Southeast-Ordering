@@ -1766,7 +1766,7 @@ elif not catalog_file:
     with col_img:
         st.subheader("📸 Reference Settings")
         try:
-            st.image("./Data/Images/Export Example.png",
+            st.image("./assets/Export Example.png",
                      use_container_width=True, caption="Select the 'Filtered' option.")
         except:
             st.warning("Reference image not found.")
@@ -1787,9 +1787,9 @@ helpful message instead of a blank page:
   `try`/`except` around `st.image` prevents a missing image file from
   crashing the whole welcome screen — it just shows a plain warning
   instead if the file isn't found. **Note:** this relies on a local file
-  at `./Data/Images/Export Example.png` relative to wherever `streamlit
+  at `./assets/Export Example.png` relative to wherever `streamlit
 run` is launched from — if you rebuild this project fresh, recreate that
-  `Data/Images/` folder alongside `main.py` and drop a reference
+  `assets/` folder alongside `main.py` and drop a reference
   screenshot in it (or update the path).
 - Catalog uploaded and store(s) selected, but rules matrix not loaded yet
   → warning pointing at the vendor dropdown + load button.
