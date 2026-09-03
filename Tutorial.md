@@ -1,8 +1,16 @@
 # Rebuilding the Southeast Inventory & Ordering App — Full Tutorial
 
-This is a from-scratch, line-by-line walkthrough of `main.py`. If you lost
+This is a from-scratch, line-by-line walkthrough of the app. If you lost
 every past conversation and the codebase disappeared, this document alone
 should let you rebuild the app and understand _why_ every piece exists.
+
+> **Recent structural changes:** the app used to be a single 945-line
+> `main.py`. It's since been split into focused modules (see §1.1), two
+> unused files (`manage_rules.py` and a local `Data/` folder of stale
+> catalog/rules Excel files that nothing in the deployed app actually
+> read) were deleted, and dependency versions in `requirements.txt` were
+> pinned to a mutually-compatible set. This tutorial describes the current,
+> post-split codebase.
 
 ---
 
@@ -32,6 +40,36 @@ widget interaction (a button click, a number input change) re-executes the
 whole script top to bottom, using `st.session_state` to remember values
 across reruns.
 
+### 1.1 Project layout
+
+The app is split across these files, all flat at the repo root (matching
+the project's existing convention — no `src/` nesting):
+
+| File | Responsibility |
+|---|---|
+| `main.py` | Thin orchestrator: page setup, session state, sidebar call, rules-loading branch, the top-level guard, and the per-store tab loop. Still the file Streamlit actually runs (`streamlit run main.py`). |
+| `config.py` | `SCOPES`, `SHEET_IDS`, `store_map`, `inv_store_map`, `priority_stores` — the single source of truth for vendor/store configuration. |
+| `catalog.py` | `clean_id()` and `load_catalog()` — loading and cleaning a Square catalog export. |
+| `google_sheets.py` | `get_google_client()` and `load_rules_from_sheets()` — Google auth and pulling a vendor's rules matrix. |
+| `ordering.py` | `compute_store_order()` and `get_allocation_candidates()` — the actual order-quantity math. Pure pandas/numpy, **no Streamlit calls at all**, so it can be imported and tested independent of the running app. |
+| `ui_sidebar.py` | `render_sidebar()` — the sidebar inputs (file upload, vendor picker, store multiselect, HQ threshold slider). |
+| `ui_allocation.py` | The HQ Allocation UI: the conflicts table, per-SKU allocation inputs, the Push button, and the post-push summary. |
+| `ui_store_tab.py` | `render_store_tab()` — the HQ Transfer + Vendor Order UI rendered inside each store's tab. |
+| `ui_summary.py` | `render_consolidated_summary()` — the cross-store consolidated order summary at the bottom of the page. |
+
+Why split it this way: `ordering.py` holds every line of actual business
+math and has zero UI dependency, which means the reorder logic can be
+sanity-checked directly (load a catalog + rules matrix with plain pandas,
+call `compute_store_order`, inspect the DataFrame) without going through
+Streamlit at all. Everything else is grouped by what it's responsible
+for — one file per UI section, one file for config, one for each external
+integration (Square catalog files, Google Sheets) — so a change to, say,
+the vendor order export doesn't require scrolling past sidebar code,
+allocation code, and the summary code to find it.
+
+`main.py` imports from all of the above and wires them together; it no
+longer contains any business logic itself.
+
 ---
 
 ## 2. Environment setup
@@ -39,7 +77,20 @@ across reruns.
 ### 2.1 Install dependencies
 
 ```bash
-pip install streamlit pandas numpy gspread google-auth xlsxwriter openpyxl
+pip install -r requirements.txt
+```
+
+`requirements.txt` pins every package to a specific, verified-compatible
+version:
+
+```
+streamlit==1.52.1
+pandas==2.3.3
+numpy==2.4.4
+gspread==6.2.1
+google-auth==2.52.0
+openpyxl==3.1.5
+xlsxwriter==3.2.9
 ```
 
 - `streamlit` — the web app framework.
@@ -51,6 +102,15 @@ pip install streamlit pandas numpy gspread google-auth xlsxwriter openpyxl
   cleanly).
 - `openpyxl` — needed by `pandas.read_excel` to _read_ `.xlsx` catalog
   uploads.
+
+**Why pin versions:** `streamlit==1.52.1` requires `pandas<3`. An earlier
+version of this file had `pandas==3.0.2` unpinned-then-repinned without
+re-checking that constraint, which broke the Streamlit Cloud deploy
+outright (`pip` refuses to install two packages with conflicting
+requirements). If you ever bump one of these versions, re-run
+`pip install --dry-run -r requirements.txt` first — it reports dependency
+conflicts without actually installing anything, which is exactly what
+would have caught that break before it reached production.
 
 ### 2.2 Google service account (for `load_rules_from_sheets`)
 
@@ -82,42 +142,139 @@ client_x509_cert_url = "..."
 On Streamlit Community Cloud, this same TOML content goes into the app's
 **Secrets** panel in the dashboard instead of a local file.
 
+`.streamlit/secrets.toml` and a local `credentials.json` (an older,
+now-deleted artifact from before the app switched fully to
+`st.secrets`) are both gitignored — never commit real credentials.
+`get_google_client()` (§5.3) reads exclusively from `st.secrets`, which
+works identically whether that's backed by a local `secrets.toml` file or
+the Streamlit Cloud Secrets panel — so there's no code difference between
+local and deployed auth.
+
 ### 2.3 Run it
 
 ```bash
 streamlit run main.py
 ```
 
+`main.py` is still the entry point — the module split didn't change how
+the app is launched, only how its code is organized internally. This is
+also why `main.py` stays the name Streamlit Cloud is configured to run.
+
 ---
 
-## 3. Imports
+## 3. Imports, by module
+
+Rather than one flat import block, each module now only imports what it
+actually needs:
+
+**`config.py`** — no imports; it's pure data (dictionaries and lists).
+
+**`catalog.py`**
+
+```python
+import pandas as pd
+import streamlit as st
+```
+
+`pandas` for `pd.read_excel`/DataFrame work; `streamlit` only for the
+`@st.cache_data` decorator on `load_catalog`.
+
+**`google_sheets.py`**
+
+```python
+import pandas as pd
+import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
+
+from config import SCOPES, SHEET_IDS
+from catalog import clean_id
+```
+
+`gspread` + `Credentials` are the Google Sheets client library and the
+auth helper for service-account credentials. It imports `SCOPES`/
+`SHEET_IDS` from `config.py` and reuses `clean_id` from `catalog.py`
+rather than redefining SKU-cleaning logic a second time.
+
+**`ordering.py`**
+
+```python
+import pandas as pd
+import numpy as np
+
+from config import inv_store_map
+```
+
+Notably **no `import streamlit`** — this file is pure data computation.
+`numpy` provides the vectorized `np.where`, `np.ceil`, `np.floor`,
+`np.maximum` used for fast per-row math across the whole DataFrame at
+once (much faster than looping row by row).
+
+**`ui_sidebar.py`**
+
+```python
+import streamlit as st
+from config import SHEET_IDS, store_map, priority_stores
+```
+
+**`ui_allocation.py`**
 
 ```python
 import streamlit as st
 import pandas as pd
-import io
-import numpy as np
-from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
 ```
 
-- `streamlit as st` — every UI element (`st.button`, `st.dataframe`, etc.)
-- `pandas as pd` — the DataFrame is the core data structure for the whole
-  app: one row per SKU, one column per attribute (inventory, min/max,
-  cost...).
-- `io` — used to build Excel files **in memory** (`io.BytesIO()`) so they
-  can be handed to `st.download_button` without ever touching disk.
-- `numpy as np` — vectorized `np.where`, `np.ceil`, `np.floor`, `np.maximum`
-  for fast per-row math across the whole DataFrame at once (much faster
-  than looping row by row).
-- `datetime` — used once, to stamp filenames with today's date.
-- `gspread` + `Credentials` — the Google Sheets client library and the
-  auth helper for service-account credentials.
+(It doesn't need `config` or `ordering` directly — everything it needs is
+handed in as function arguments by `main.py`.)
+
+**`ui_store_tab.py`**
+
+```python
+import io
+import streamlit as st
+import numpy as np
+import pandas as pd
+
+from config import inv_store_map
+```
+
+`io` is used to build Excel files **in memory** (`io.BytesIO()`) so they
+can be handed to `st.download_button` without ever touching disk.
+
+**`ui_summary.py`**
+
+```python
+import io
+import streamlit as st
+import pandas as pd
+
+from config import inv_store_map
+from ordering import compute_store_order
+```
+
+**`main.py`**
+
+```python
+import streamlit as st
+from datetime import datetime
+
+from catalog import load_catalog
+from google_sheets import load_rules_from_sheets
+from ordering import compute_store_order, get_allocation_candidates
+from ui_sidebar import render_sidebar
+from ui_allocation import render_allocation_section
+from ui_store_tab import render_store_tab
+from ui_summary import render_consolidated_summary
+from config import inv_store_map
+```
+
+`datetime` is used once, to stamp filenames with today's date.
+`main.py` imports the one function it calls directly from each UI module
+— it never reaches into another module's internals.
 
 ---
 
-## 4. Configuration constants
+## 4. Configuration constants — `config.py`
 
 ### 4.1 `SCOPES`
 
@@ -146,7 +303,7 @@ SHEET_IDS = {
 A hard-coded mapping of **vendor name → Google Sheet ID** (the long string
 in a Sheet's URL between `/d/` and `/edit`). Each sheet is that vendor's
 rules matrix. This dictionary also populates the vendor dropdown in the
-sidebar — the keys are literally the dropdown options.
+sidebar (`ui_sidebar.py`) — the keys are literally the dropdown options.
 
 > **To add a new vendor:** create/duplicate a rules-matrix sheet, share it
 > with the service account email, copy its Sheet ID from the URL, and add
@@ -168,15 +325,15 @@ inv_store_map = {v: k for k, v in store_map.items()}
   to the **short internal code** used everywhere else in the app (`CC`,
   `CM`, etc.).
 - `inv_store_map` is the same dictionary flipped around (short code → long
-  column name), built with a dict comprehension. It's the one actually used
-  most often, because the rest of the app works in short codes (for the
-  rules matrix column prefixes like `CC_Min`) but needs to look the right
-  long column name up in the catalog DataFrame.
+  column name), built with a dict comprehension. It's the one actually
+  used most often, and it's imported by `ordering.py`, `ui_store_tab.py`,
+  `ui_summary.py`, and `main.py` — every module that needs to translate a
+  short store code back into the catalog's actual column name.
 
 > **If Square renames a store or you open a new location:** add both the
-> long name (however Square exports it) and its short code to `store_map`.
-> Also add matching `{code}_DNO`, `{code}_Min`, `{code}_Max` columns to
-> every vendor's rules-matrix Google Sheet.
+> long name (however Square exports it) and its short code to `store_map`
+> in `config.py`. Also add matching `{code}_DNO`, `{code}_Min`,
+> `{code}_Max` columns to every vendor's rules-matrix Google Sheet.
 
 ### 4.4 `priority_stores`
 
@@ -184,15 +341,21 @@ inv_store_map = {v: k for k, v in store_map.items()}
 priority_stores = ['CC', 'CM', 'CVM', 'LB', 'SH']
 ```
 
-The default pre-checked selection in the "Store Selection" multiselect —
-just a convenience default, not a hard restriction. Any store in
-`store_map` can be selected.
+The default pre-checked selection in the "Store Selection" multiselect
+(`ui_sidebar.py`) — just a convenience default, not a hard restriction.
+Any store in `store_map` can be selected.
+
+> **Before the module split**, this same configuration was duplicated
+> between `main.py` and a since-deleted `manage_rules.py` script that
+> synced a local rules-matrix Excel file (superseded by the Google Sheets
+> flow and no longer used). `config.py` is now the one place this data
+> lives.
 
 ---
 
 ## 5. Helper functions
 
-### 5.1 `clean_id(val)`
+### 5.1 `clean_id(val)` — `catalog.py`
 
 ```python
 def clean_id(val):
@@ -211,9 +374,11 @@ Normalizes a SKU (or GTIN) value into a clean string:
 
 This matters because SKUs need to match **exactly** as strings when the
 catalog and the rules matrix are merged later — a mismatch like `"12345"`
-vs `"12345.0"` would silently produce zero matches.
+vs `"12345.0"` would silently produce zero matches. `google_sheets.py`
+imports this exact function rather than redefining its own copy, so the
+catalog and the rules matrix always normalize SKUs identically.
 
-### 5.2 `load_catalog(file)`
+### 5.2 `load_catalog(file)` — `catalog.py`
 
 ```python
 @st.cache_data
@@ -224,7 +389,6 @@ def load_catalog(file) -> pd.DataFrame:
     df['SKU'] = df['SKU'].apply(clean_id)
     if 'GTIN' in df.columns:
         df['GTIN'] = df['GTIN'].astype(str).str.strip()
-    return df
 ```
 
 - `@st.cache_data` — Streamlit caches the return value keyed on the input
@@ -246,11 +410,38 @@ def load_catalog(file) -> pd.DataFrame:
   (GTIN/barcodes must never become numbers — leading zeros are
   significant).
 
-### 5.3 `get_google_client()`
+```python
+    if 'Item Name' in df.columns and 'Variation Name' in df.columns:
+        def _combine_item_variation(row):
+            item_name = str(row['Item Name'])
+            var_name = row['Variation Name']
+            if pd.isna(var_name):
+                return item_name
+            var_name = str(var_name).strip()
+            if not var_name or var_name.lower() == 'nan':
+                return item_name
+            if var_name.lower() in item_name.lower():
+                return item_name
+            return f"{item_name} - {var_name}"
+        df['Item Name'] = df.apply(_combine_item_variation, axis=1)
+
+    return df
+```
+
+Square sometimes leaves `Item Name` identical across an item's variations
+(e.g. a 14oz and 28oz of the same product both show as just "CPT Fresh
+Field Jerky Bison & Apple") and puts the distinguishing detail in
+`Variation Name` instead. Since this app displays/exports by `Item Name`
+everywhere, this folds the variation in wherever it's present and not
+already part of the name, so the two sizes don't look identical in the
+UI, HQ transfer sheets, or vendor order exports.
+
+### 5.3 `get_google_client()` — `google_sheets.py`
 
 ```python
 @st.cache_resource
 def get_google_client():
+    """Authenticate using Streamlit secrets — works both locally and on Streamlit Cloud."""
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
         scopes=SCOPES
@@ -265,11 +456,12 @@ def get_google_client():
   (populated from `secrets.toml`, see §2.2), builds `Credentials`, and
   authorizes a `gspread` client with them.
 
-### 5.4 `load_rules_from_sheets(vendor)`
+### 5.4 `load_rules_from_sheets(vendor)` — `google_sheets.py`
 
 ```python
 @st.cache_data(ttl=3600)
 def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
+    """Pull the rules matrix for the given vendor from Google Sheets."""
     if vendor not in SHEET_IDS:
         raise ValueError(f"No Sheet ID configured for vendor '{vendor}'.")
     client = get_google_client()
@@ -321,17 +513,11 @@ This loop type-coerces every column except `SKU`:
   meaning "Do Not Order at this store"): Google Sheets can hand back a
   checkbox cell as a native Python `bool`, as `0`/`1`, or as the literal
   text `"TRUE"`/`"FALSE"` depending on how the cell was formatted/typed in
-  the sheet. The naive approach — `pd.to_numeric` then `.fillna(0).astype(bool)`
-  — silently breaks: a text cell `"FALSE"` fails `to_numeric`, becomes
-  `NaN`, `fillna(0)` turns it into `0`, and `.astype(bool)` on `0` is
-  `False`... **but** a stray/malformed cell or a `"1.0"` text string could
-  just as easily collapse the wrong way, and worse, mixed types across
-  the column can make `NaN`-driven logic unpredictable in aggregate. The
-  explicit `.map(...)` sidesteps all of that: any value whose _stripped,
-  uppercased string form_ is one of `'TRUE'`, `'1'`, `'YES'`, `'1.0'` is
-  `True`; anything else (including genuinely empty cells, since
-  `pd.notna(x)` guards the `NaN` case) is `False`. No ambiguity, and the
-  column always ends up as clean native `bool`.
+  the sheet. The explicit `.map(...)` sidesteps ambiguity: any value whose
+  _stripped, uppercased string form_ is one of `'TRUE'`, `'1'`, `'YES'`,
+  `'1.0'` is `True`; anything else (including genuinely empty cells, since
+  `pd.notna(x)` guards the `NaN` case) is `False`. The column always ends
+  up as clean native `bool`.
 - **Every other column** (e.g. `Order In Quantities`, `CC_Min`, `CC_Max`):
   attempt `pd.to_numeric(..., errors='coerce')`, which turns anything
   non-numeric into `NaN`. The `if converted.notna().sum() > 0:` guard means
@@ -343,10 +529,11 @@ This loop type-coerces every column except `SKU`:
 
 ---
 
-## 6. Session state initialization
+## 6. Session state initialization — `main.py`
 
 ```python
 def init_session_defaults():
+    """Initialize all session state defaults upfront."""
     defaults = {
         "rules_vendor": None,
         "rules_matrix": None,
@@ -369,24 +556,29 @@ rerun never clobbers values the user has already interacted with.
   from Google Sheets on every rerun (only on vendor change or button
   click).
 - `hq_allocations` — the nested `{sku: {store_code: qty}}` structure that
-  stores manual HQ-stock splits (see §9).
+  stores manual HQ-stock splits (see §13).
 - `current_tab` — declared but not actively read anywhere in the current
   version; a placeholder for a future feature.
 - `allocations_submitted` — flips to `True` once the user pushes their HQ
   allocation choices, which reveals the Allocation Summary section.
 
-This function is called once near the top of the script, **before**
-anything else touches `st.session_state`, so every downstream read is
-guaranteed to find a key already present.
+This function stays in `main.py` (it's app-lifecycle plumbing, not tied to
+any one UI section) and is called once near the top of the script,
+**before** anything else touches `st.session_state`, so every downstream
+read is guaranteed to find a key already present.
 
 ---
 
-## 7. Page setup
+## 7. Page setup — `main.py`
 
 ```python
 st.set_page_config(page_title="Inventory & Ordering System", layout="wide")
+
 init_session_defaults()
+
 st.title("📦 Southeast Inventory & Ordering")
+
+catalog_file, selected_vendor, load_rules_btn, selected_stores, hq_threshold = render_sidebar()
 ```
 
 - `set_page_config` must be the first Streamlit command in the script (or
@@ -395,16 +587,24 @@ st.title("📦 Southeast Inventory & Ordering")
   allocation grids get wide.
 - Initializes session state.
 - Renders the page's main title.
+- Calls `render_sidebar()` (§8) and unpacks its return tuple into the five
+  local variables the rest of `main.py` needs. This is the one line that
+  replaced the entire inline `with st.sidebar: ...` block that used to
+  live directly in `main.py`.
 
 ---
 
-## 8. Sidebar — inputs
+## 8. Sidebar — `ui_sidebar.py`
 
 ```python
-with st.sidebar:
-    st.header("1. Upload Files")
-    catalog_file = st.file_uploader(
-        "Upload Southeast Catalog (.xlsx)", type=['xlsx'])
+def render_sidebar():
+    """Renders the sidebar inputs and returns the values the rest of the
+    app needs: (catalog_file, selected_vendor, load_rules_btn,
+    selected_stores, hq_threshold)."""
+    with st.sidebar:
+        st.header("1. Upload Files")
+        catalog_file = st.file_uploader(
+            "Upload Southeast Catalog (.xlsx)", type=['xlsx'])
 ```
 
 A file-upload widget restricted to `.xlsx`. Returns `None` until a file is
@@ -412,24 +612,24 @@ chosen; once chosen, returns a file-like object that `load_catalog()`
 reads.
 
 ```python
-    st.divider()
-    st.header("2. Vendor")
-    selected_vendor = st.selectbox(
-        "Select vendor to load rules from Google Sheets:",
-        options=["-- Select a Vendor --"] + list(SHEET_IDS.keys())
-    )
+        st.divider()
+        st.header("2. Vendor")
+        selected_vendor = st.selectbox(
+            "Select vendor to load rules from Google Sheets:",
+            options=["-- Select a Vendor --"] + list(SHEET_IDS.keys())
+        )
 ```
 
-A dropdown built from `SHEET_IDS`' keys, with a placeholder "unselected"
-option prepended so the app can tell "nothing chosen yet" apart from a
-real vendor.
+A dropdown built from `SHEET_IDS`' keys (imported from `config.py`), with
+a placeholder "unselected" option prepended so the app can tell "nothing
+chosen yet" apart from a real vendor.
 
 ```python
-    if selected_vendor != st.session_state.get("rules_vendor") and selected_vendor != "-- Select a Vendor --":
-        st.session_state.rules_matrix = None
-        st.session_state.rules_vendor = None
-        st.session_state.hq_allocations = {}
-        st.session_state.allocations_submitted = False
+        if selected_vendor != st.session_state.get("rules_vendor") and selected_vendor != "-- Select a Vendor --":
+            st.session_state.rules_matrix = None
+            st.session_state.rules_vendor = None
+            st.session_state.hq_allocations = {}
+            st.session_state.allocations_submitted = False
 ```
 
 **Vendor-change guard.** If the dropdown selection no longer matches the
@@ -443,40 +643,41 @@ explicitly reload rules for the new vendor rather than silently continuing
 to compute orders against the wrong rules matrix.
 
 ```python
-    load_rules_btn = st.button("📥 Load Rules from Google Sheets")
+        load_rules_btn = st.button("📥 Load Rules from Google Sheets")
+
+        st.divider()
+        st.header("3. Store Selection")
+        selected_stores = st.multiselect(
+            "Select stores:", options=list(store_map.values()), default=priority_stores
+        )
+
+        st.divider()
+        st.header("4. HQ Threshold")
+        hq_threshold = st.slider(
+            "Suggest HQ Transfer if HQ Qty >", 0, 20, 6,
+            help="Items with HQ stock exceeding this amount will be suggested for HQ transfer."
+        )
+
+    return catalog_file, selected_vendor, load_rules_btn, selected_stores, hq_threshold
 ```
 
-A plain button; `st.button` returns `True` only on the exact rerun
-triggered by the click, `False` on every other rerun.
-
-```python
-    st.divider()
-    st.header("3. Store Selection")
-    selected_stores = st.multiselect(
-        "Select stores:", options=list(store_map.values()), default=priority_stores
-    )
-```
-
-Lets the user pick which store short-codes to process. Defaults to
-`priority_stores`.
-
-```python
-    st.divider()
-    st.header("4. HQ Threshold")
-    hq_threshold = st.slider(
-        "Suggest HQ Transfer if HQ Qty >", 0, 20, 6,
-        help="Items with HQ stock exceeding this amount will be suggested for HQ transfer."
-    )
-```
-
-A slider from 0–20, default 6. This is the cutoff used later: a SKU only
-gets suggested as an HQ transfer if HQ's on-hand quantity is _strictly
-greater than_ this number — the idea being "don't drain HQ down to a
-sliver just to avoid a vendor order."
+- `load_rules_btn` — a plain button; `st.button` returns `True` only on
+  the exact rerun triggered by the click, `False` on every other rerun.
+- `selected_stores` — lets the user pick which store short-codes to
+  process, defaulting to `priority_stores` (from `config.py`).
+- `hq_threshold` — a slider from 0–20, default 6. This is the cutoff used
+  later: a SKU only gets suggested as an HQ transfer if HQ's on-hand
+  quantity is _strictly greater than_ this number — the idea being "don't
+  drain HQ down to a sliver just to avoid a vendor order."
+- The final `return` line is the function's entire contract with the rest
+  of the app: five values, in this exact order, every time. `main.py`
+  unpacks them positionally (§7), so if you ever add a sixth sidebar
+  input, add it to both the return tuple here and the unpacking line in
+  `main.py` together.
 
 ---
 
-## 9. Loading the rules matrix
+## 9. Loading the rules matrix — `main.py`
 
 ```python
 rules_matrix = None
@@ -498,7 +699,12 @@ elif st.session_state.get("rules_matrix") is not None and st.session_state.get("
     st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
 ```
 
-Three-way branch, evaluated top to bottom, only one branch runs per rerun:
+Three-way branch, evaluated top to bottom, only one branch runs per rerun.
+`load_rules_from_sheets` here is the function imported from
+`google_sheets.py` at the top of `main.py`; everything else is identical
+to before the split — `catalog_file`, `selected_vendor`, `load_rules_btn`,
+and `selected_stores` just now come from `render_sidebar()`'s return
+tuple instead of being assigned directly inline.
 
 1. **No vendor picked yet** → just show an info message.
 2. **The load button was just clicked** → `load_rules_from_sheets.clear()`
@@ -521,18 +727,18 @@ loaded) or a DataFrame ready to use.
 
 ---
 
-## 10. Main app — guard and setup
+## 10. Main app — guard and setup — `main.py`
 
 ```python
 if catalog_file and rules_matrix is not None and selected_stores:
     df_master = load_catalog(catalog_file)
 ```
 
-The entire rest of the app (hundreds of lines) is gated behind having all
-three prerequisites: a catalog file, a loaded rules matrix, and at least
-one selected store. `df_master` is the full catalog DataFrame — one row
-per SKU, with a column per store's `Current Quantity ...` plus
-`Current Quantity HQ`, `GTIN`, `Item Name`, `Default Unit Cost`, `SKU`.
+The entire rest of the app is gated behind having all three prerequisites:
+a catalog file, a loaded rules matrix, and at least one selected store.
+`df_master` is the full catalog DataFrame — one row per SKU, with a
+column per store's `Current Quantity ...` plus `Current Quantity HQ`,
+`GTIN`, `Item Name`, `Default Unit Cost`, `SKU`.
 
 ```python
     catalog_skus = set(df_master['SKU'].unique())
@@ -585,12 +791,17 @@ rather than crashing deeper in the code with a cryptic `KeyError`.
     st.caption(f"✅ Matched {matched} of {total} catalog SKUs to rules.")
 
     if unmatched_skus:
-        print(f"\n⚠️  WARNING: {len(unmatched_skus)} Unmatched SKUs found:")
-        for sku in unmatched_list:
-            item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
-                df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
-            print(f"  - {sku}: {item_name}")
-        print(f"\nTotal unmatched: {len(unmatched_skus)}\n")
+        # Server-console diagnostics only — never let an encoding quirk in
+        # Item Name text (or the terminal's own encoding) crash the app.
+        try:
+            print(f"\nWARNING: {len(unmatched_skus)} Unmatched SKUs found:")
+            for sku in unmatched_list:
+                item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
+                    df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
+                print(f"  - {sku}: {item_name}")
+            print(f"\nTotal unmatched: {len(unmatched_skus)}\n")
+        except UnicodeEncodeError:
+            print(f"\nWARNING: {len(unmatched_skus)} unmatched SKUs found (names omitted — non-ASCII console).")
 ```
 
 Computes how many catalog SKUs successfully matched a rules-matrix row
@@ -599,23 +810,36 @@ a caption in the UI, and — for any catalog SKU with **no** matching rules
 row at all — logs each one's SKU + item name to the server console
 (`print`, visible in the terminal/logs, not the browser). These unmatched
 SKUs are typically discontinued items that were deliberately removed from
-the rules matrix (tracked in the "Excluded SKUs" sheet tab — see §16),
+the rules matrix (tracked in the "Excluded SKUs" sheet tab — see §19),
 but the app doesn't cross-check against that tab yet, so this console log
 is currently the only visibility into which SKUs fell out.
 
+> **Why the `try`/`except UnicodeEncodeError` wrapper:** this diagnostic
+> block used to be a bare `print(f"\n⚠️  WARNING: ...")`. On a Windows
+> console using the default `cp1252` encoding, printing that emoji
+> character raises `UnicodeEncodeError` and crashes the entire app
+> — discovered live while testing this app with a real catalog that
+> actually had unmatched SKUs (the happy-path test data used during the
+> module split didn't happen to trigger this branch, so it went
+> unnoticed until real data hit it). The emoji was dropped from the
+> literal text, and the whole block wrapped in a `try`/`except` so that
+> even an unexpected encoding issue in an `Item Name` string can't take
+> down the page — this is server-console logging only, never worth
+> crashing the user-facing app over.
+
 ---
 
-## 11. `compute_store_order` — the core calculation
+## 11. `compute_store_order` — the core calculation — `ordering.py`
 
 This is the single most important function in the app: everything else
-just calls it and displays/exports the result. It's defined _inside_ the
-`if catalog_file and ...` block (a nested function), which is a deliberate
-closure trick — it captures `df_master`'s column names validated above
-without needing to re-pass constants like `hq_col`.
+just calls it and displays/exports the result. It lives in `ordering.py`
+as a genuine top-level, standalone function — no Streamlit import, no
+closure over anything from `main.py`. Every value it needs is an explicit
+parameter:
 
 ```python
-    def compute_store_order(store_code, df_master, rules_matrix, hq_col,
-                            hq_threshold, allocation_candidates, hq_allocations):
+def compute_store_order(store_code, df_master, rules_matrix, hq_col,
+                        hq_threshold, allocation_candidates, hq_allocations):
 ```
 
 Takes: which store to compute for, the catalog, the (already
@@ -623,38 +847,50 @@ catalog-filtered) rules matrix, the HQ column name, the HQ threshold from
 the sidebar slider, the dict of SKUs with cross-store HQ conflicts (see
 §12), and the current manual allocation choices.
 
+Being a plain, dependency-free function is what lets three completely
+different call sites — the per-store tab loop in `main.py`, the
+consolidated summary in `ui_summary.py`, and the conflict-detection pass
+in `get_allocation_candidates` (§12, same file) — all share the exact same
+calculation with zero risk of drift between them. It also means this
+function can be sanity-checked directly from a plain Python shell (load a
+catalog + rules matrix with `pandas.read_excel`, call
+`compute_store_order(...)`, inspect the result) without running Streamlit
+at all — which is exactly how the module split was verified against real
+data before merging.
+
 ### 11.1 Merge catalog + rules for one store
 
 ```python
-        long_name = inv_store_map[store_code]
+    long_name = inv_store_map[store_code]
 
-        lookup_cols = ['SKU', 'Order In Quantities',
-                       f'{store_code}_DNO', f'{store_code}_Min', f'{store_code}_Max']
-        valid_lookup = [c for c in lookup_cols if c in rules_matrix.columns]
-        store_rules = rules_matrix[valid_lookup].copy().rename(columns={
-            f'{store_code}_DNO': 'DNO',
-            f'{store_code}_Min': 'Min',
-            f'{store_code}_Max': 'Max'
-        })
+    lookup_cols = ['SKU', 'Order In Quantities',
+                   f'{store_code}_DNO', f'{store_code}_Min', f'{store_code}_Max']
+    valid_lookup = [c for c in lookup_cols if c in rules_matrix.columns]
+    store_rules = rules_matrix[valid_lookup].copy().rename(columns={
+        f'{store_code}_DNO': 'DNO',
+        f'{store_code}_Min': 'Min',
+        f'{store_code}_Max': 'Max'
+    })
 ```
 
-Looks up the store's long column name. Builds the list of rules columns
-relevant to _this specific store_ — the rules matrix has per-store
-columns named like `CC_DNO`, `CC_Min`, `CC_Max`, `CM_DNO`, `CM_Min`, etc.,
-so this pulls out just the current store's triplet (plus the
-store-agnostic `SKU` and `Order In Quantities`) and renames them to
-generic `DNO`/`Min`/`Max` so the rest of the function doesn't need to know
-which store it's working on. `valid_lookup` guards against a column being
-absent entirely (e.g. a brand-new store not yet added to the rules sheet)
-rather than throwing a `KeyError`.
+Looks up the store's long column name (via `inv_store_map`, imported from
+`config.py`). Builds the list of rules columns relevant to _this specific
+store_ — the rules matrix has per-store columns named like `CC_DNO`,
+`CC_Min`, `CC_Max`, `CM_DNO`, `CM_Min`, etc., so this pulls out just the
+current store's triplet (plus the store-agnostic `SKU` and `Order In
+Quantities`) and renames them to generic `DNO`/`Min`/`Max` so the rest of
+the function doesn't need to know which store it's working on.
+`valid_lookup` guards against a column being absent entirely (e.g. a
+brand-new store not yet added to the rules sheet) rather than throwing a
+`KeyError`.
 
 ```python
-        extra_cols = ['SKU', 'GTIN', 'Item Name',
-                      'Default Unit Cost', long_name, hq_col]
-        available_cols = [c for c in extra_cols if c in df_master.columns]
-        store_inv = df_master[available_cols].copy().rename(
-            columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'}
-        )
+    extra_cols = ['SKU', 'GTIN', 'Item Name',
+                  'Default Unit Cost', long_name, hq_col]
+    available_cols = [c for c in extra_cols if c in df_master.columns]
+    store_inv = df_master[available_cols].copy().rename(
+        columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'}
+    )
 ```
 
 Pulls the relevant catalog columns for this store — SKU, GTIN, item name,
@@ -663,12 +899,12 @@ quantity column — and renames the store-specific column to the generic
 `Current_Inv` and HQ's column to `HQ_Qty`.
 
 ```python
-        data = pd.merge(store_inv, store_rules, on='SKU', how='left')
-        data = data.fillna({
-            'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
-            'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
-        })
-        data['DNO'] = data['DNO'].astype(bool)
+    data = pd.merge(store_inv, store_rules, on='SKU', how='left')
+    data = data.fillna({
+        'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
+        'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
+    })
+    data['DNO'] = data['DNO'].astype(bool)
 ```
 
 Left-joins catalog rows to rules rows on `SKU`. `how='left'` means every
@@ -683,13 +919,14 @@ float `0.0`/`1.0` column, not bool).
 ### 11.2 Decide which rows need ordering
 
 ```python
-        data['Effective_Min'] = data['Min']
-        data['Needs_Order'] = np.where(
-            data['Order In Quantities'] == 1,
-            (data['Current_Inv'] < data['Max']),
-            (data['Current_Inv'] < data['Effective_Min'])
-        )
-        data['Needs_Order'] = data['Needs_Order'] & (data['DNO'] == False)
+    data['Effective_Min'] = data['Min']
+    data['Needs_Order'] = np.where(
+        data['Order In Quantities'] == 1,
+        (data['Current_Inv'] < data['Max']),
+        (data['Current_Inv'] < data['Effective_Min'])
+    )
+    data['Needs_Order'] = data['Needs_Order'] & (
+        data['DNO'] == False) & data['Has_Rules_Match']
 ```
 
 `Effective_Min` is just `Min` aliased (kept as a separate name for
@@ -706,14 +943,18 @@ on case pack size**:
   until you're genuinely low.
 
 Then `DNO` (Do Not Order) rows are forced to `False` regardless of the
-above — a manual "never auto-order this SKU at this store" override.
+above — a manual "never auto-order this SKU at this store" override — and
+`Has_Rules_Match` (set just above this snippet, `True` only for SKUs that
+actually matched a rules-matrix row) excludes unmatched SKUs from ever
+triggering an order at all, even though `fillna` gave them harmless
+zero-`Min`/`Max` defaults.
 
 ```python
-        data['Units_Needed_To_Max'] = np.where(
-            data['Needs_Order'],
-            np.maximum(data['Max'] - data['Current_Inv'], 0),
-            0
-        )
+    data['Units_Needed_To_Max'] = np.where(
+        data['Needs_Order'],
+        np.maximum(data['Max'] - data['Current_Inv'], 0),
+        0
+    )
 ```
 
 For rows that need ordering, the raw unit shortfall is `Max - Current_Inv`
@@ -723,14 +964,14 @@ guard in case of weird data). Rows that don't need ordering get `0`.
 ### 11.3 Round the unit shortfall up to whole cases
 
 ```python
-        raw_cases = data['Units_Needed_To_Max'] / data['Order In Quantities']
-        rounded_cases = np.floor(raw_cases + 0.5)  # round-half-up
-        rounded_cases = np.where(
-            (data['Units_Needed_To_Max'] > 0) & (rounded_cases < 1),
-            1, rounded_cases
-        )
-        data['Total_Units_Needed'] = rounded_cases * \
-            data['Order In Quantities']
+    raw_cases = data['Units_Needed_To_Max'] / data['Order In Quantities']
+    rounded_cases = np.floor(raw_cases + 0.5)  # round-half-up
+    rounded_cases = np.where(
+        (data['Units_Needed_To_Max'] > 0) & (rounded_cases < 1),
+        1, rounded_cases
+    )
+    data['Total_Units_Needed'] = rounded_cases * \
+        data['Order In Quantities']
 ```
 
 You can't order a fraction of a case — this converts the raw unit
@@ -755,55 +996,53 @@ shortfall into whole cases.
 ### 11.4 Understock safety net
 
 ```python
-        would_understock = data['Needs_Order'] & (
-            (data['Current_Inv'] + data['Total_Units_Needed']
-             ) < data['Effective_Min']
-        )
-        data['Total_Units_Needed'] = np.where(
-            would_understock,
-            data['Total_Units_Needed'] + data['Order In Quantities'],
-            data['Total_Units_Needed']
-        )
+    would_understock = data['Needs_Order'] & (
+        (data['Current_Inv'] + data['Total_Units_Needed']
+         ) < data['Effective_Min']
+    )
+    data['Total_Units_Needed'] = np.where(
+        would_understock,
+        data['Total_Units_Needed'] + data['Order In Quantities'],
+        data['Total_Units_Needed']
+    )
 ```
 
-Round-half-up can occasionally round **down** to the _nearest_ case even
-though that lands you below `Min` once the order arrives — for example a
-narrow `Min=10`/`Max=11` window on a case pack of 12: any triggered order
-rounds down to a single case that overshoots `Max`, so this particular
-example wouldn't trip it, but tighter combinations of `Min`/`Max` relative
-to case size can. This block explicitly checks: for any row that needed an
-order, would `Current_Inv + Total_Units_Needed` (i.e. stock _after_ the
-order arrives) still land below `Effective_Min`? If so, bump the order up
-by exactly one more case. This is a deliberate correctness guarantee: an
-order is never allowed to leave a store below its stated minimum. It's
-especially important given tight Min/Max windows are an intentional
-business choice for slow-moving SKUs kept in stock only for new
-customers — those SKUs must never be shorted by a rounding artifact.
+Round-half-up can occasionally round **down** to the nearest case even
+though that lands you below `Min` once the order arrives, for tight
+combinations of `Min`/`Max` relative to case size. This block explicitly
+checks: for any row that needed an order, would `Current_Inv +
+Total_Units_Needed` (i.e. stock _after_ the order arrives) still land
+below `Effective_Min`? If so, bump the order up by exactly one more case.
+This is a deliberate correctness guarantee: an order is never allowed to
+leave a store below its stated minimum. It's especially important given
+tight Min/Max windows are an intentional business choice for slow-moving
+SKUs kept in stock only for new customers — those SKUs must never be
+shorted by a rounding artifact.
 
 ### 11.5 HQ allocation awareness
 
 ```python
-        data['Allocated_HQ'] = data['SKU'].apply(
-            lambda sku: hq_allocations.get(sku, {}).get(store_code, 0)
-        )
-        data['Is_Allocation_Candidate'] = data['SKU'].isin(
-            allocation_candidates.keys())
+    data['Allocated_HQ'] = data['SKU'].apply(
+        lambda sku: hq_allocations.get(sku, {}).get(store_code, 0)
+    )
+    data['Is_Allocation_Candidate'] = data['SKU'].isin(
+        allocation_candidates.keys())
 
-        data['Suggested_HQ_Qty'] = np.where(
-            (data['Total_Units_Needed'] > 0) & (data['Allocated_HQ'] > 0),
-            data['Allocated_HQ'],
-            np.where(
-                (data['Total_Units_Needed'] > 0) &
-                (data['HQ_Qty'] > hq_threshold) &
-                (~data['Is_Allocation_Candidate']),
-                data['Total_Units_Needed'], 0
-            )
+    data['Suggested_HQ_Qty'] = np.where(
+        (data['Total_Units_Needed'] > 0) & (data['Allocated_HQ'] > 0),
+        data['Allocated_HQ'],
+        np.where(
+            (data['Total_Units_Needed'] > 0) &
+            (data['HQ_Qty'] > hq_threshold) &
+            (~data['Is_Allocation_Candidate']),
+            data['Total_Units_Needed'], 0
         )
+    )
 ```
 
 - `Allocated_HQ` — for each row, look up whether the user manually
   allocated any HQ stock to _this_ store for _this_ SKU (from the nested
-  `hq_allocations` dict — see §9/§12). Defaults to `0` if nothing was
+  `hq_allocations` dict — see §13). Defaults to `0` if nothing was
   allocated.
 - `Is_Allocation_Candidate` — flags whether this SKU is one where store
   demand exceeds HQ supply across the whole selected-store set (computed
@@ -823,14 +1062,14 @@ customers — those SKUs must never be shorted by a rounding artifact.
 ### 11.6 Vendor remainder
 
 ```python
-        data['Vendor_Units'] = (
-            data['Total_Units_Needed'] - data['Suggested_HQ_Qty']
-        ).clip(lower=0)
-        data['Vendor_Cases'] = np.ceil(
-            data['Vendor_Units'] / data['Order In Quantities']
-        )
+    data['Vendor_Units'] = (
+        data['Total_Units_Needed'] - data['Suggested_HQ_Qty']
+    ).clip(lower=0)
+    data['Vendor_Cases'] = np.ceil(
+        data['Vendor_Units'] / data['Order In Quantities']
+    )
 
-        return data
+    return data
 ```
 
 Whatever isn't covered by the HQ suggestion has to come from the vendor:
@@ -848,30 +1087,34 @@ detection, the per-store tabs, the consolidated summary) consumes.
 
 ---
 
-## 12. `get_allocation_candidates` — finding HQ conflicts
+## 12. `get_allocation_candidates` — finding HQ conflicts — `ordering.py`
+
+Also a top-level function in `ordering.py`, right below
+`compute_store_order` in the same file (it calls that function directly,
+no import needed since they're in the same module):
 
 ```python
-    def get_allocation_candidates(df_master, rules_matrix, hq_col,
-                                  selected_stores, hq_threshold):
-        store_needs_list = []
+def get_allocation_candidates(df_master, rules_matrix, hq_col,
+                              selected_stores, hq_threshold):
+    store_needs_list = []
 
-        for store_code in selected_stores:
-            long_name = inv_store_map[store_code]
-            if long_name not in df_master.columns:
-                continue
+    for store_code in selected_stores:
+        long_name = inv_store_map[store_code]
+        if long_name not in df_master.columns:
+            continue
 
-            data = compute_store_order(
-                store_code, df_master, rules_matrix, hq_col,
-                hq_threshold, allocation_candidates={}, hq_allocations={}
-            )
-            needs = data[data['Total_Units_Needed'] > 0][
-                ['SKU', 'Total_Units_Needed', 'Current_Inv',
-                    'HQ_Qty', 'Order In Quantities']
-            ].copy()
-            needs['Store'] = store_code
-            needs.rename(
-                columns={'Total_Units_Needed': 'Units_Needed'}, inplace=True)
-            store_needs_list.append(needs)
+        data = compute_store_order(
+            store_code, df_master, rules_matrix, hq_col,
+            hq_threshold, allocation_candidates={}, hq_allocations={}
+        )
+        needs = data[data['Total_Units_Needed'] > 0][
+            ['SKU', 'Total_Units_Needed', 'Current_Inv',
+                'HQ_Qty', 'Order In Quantities']
+        ].copy()
+        needs['Store'] = store_code
+        needs.rename(
+            columns={'Total_Units_Needed': 'Units_Needed'}, inplace=True)
+        store_needs_list.append(needs)
 ```
 
 Runs `compute_store_order` for **every selected store**, but crucially
@@ -881,23 +1124,25 @@ reflects pure need before any HQ stock has been mentally spoken for. For
 each store, keeps only the rows that actually need ordering, tags each row
 with which store it came from, and collects them into a list.
 
-Note: this function is called once per store _inside_ this loop, and it's
-called again later per store for the actual tabs — that's `O(stores)`
-duplicate work, accepted as a simplicity/correctness tradeoff (correctness
-via `get_allocation_candidates` taking explicit arguments — see the note
-below — was prioritized over micro-optimizing away the recomputation).
+Note: this function is called once per store _inside_ this loop, and
+`compute_store_order` is called again later per store for the actual tabs
+(`main.py`) and again for the consolidated summary (`ui_summary.py`) —
+that's `O(stores)` duplicate work across three call sites, accepted as a
+simplicity/correctness tradeoff (correctness via every call site passing
+explicit arguments — see the note below — was prioritized over
+micro-optimizing away the recomputation).
 
 ```python
-        if not store_needs_list:
-            return {}
+    if not store_needs_list:
+        return {}
 
-        combined = pd.concat(store_needs_list, ignore_index=True)
+    combined = pd.concat(store_needs_list, ignore_index=True)
 
-        sku_groups = combined.groupby('SKU').agg({
-            'Units_Needed': 'sum',
-            'HQ_Qty': 'first',
-            'Store': 'count'
-        }).rename(columns={'Store': 'Store_Count'})
+    sku_groups = combined.groupby('SKU').agg({
+        'Units_Needed': 'sum',
+        'HQ_Qty': 'first',
+        'Store': 'count'
+    }).rename(columns={'Store': 'Store_Count'})
 ```
 
 Stacks every store's need-rows into one DataFrame, then groups by SKU:
@@ -906,10 +1151,10 @@ quantity (same for every row of a given SKU, so `'first'` is fine), and a
 count of how many stores need it.
 
 ```python
-        conflicts = sku_groups[
-            (sku_groups['Units_Needed'] > sku_groups['HQ_Qty']) &
-            (sku_groups['HQ_Qty'] > hq_threshold)
-        ]
+    conflicts = sku_groups[
+        (sku_groups['Units_Needed'] > sku_groups['HQ_Qty']) &
+        (sku_groups['HQ_Qty'] > hq_threshold)
+    ]
 ```
 
 A SKU is a genuine **conflict** — requiring a human to decide who gets
@@ -920,25 +1165,25 @@ any stock, there's no point offering a transfer at all; every store just
 orders from the vendor as normal).
 
 ```python
-        allocation_candidates = {}
-        for sku in conflicts.index:
-            sku_data = combined[combined['SKU'] == sku]
-            demand_map = {
-                row['Store']: {
-                    'demand': int(row['Units_Needed']),
-                    'current_inv': int(row['Current_Inv'])
-                }
-                for _, row in sku_data.iterrows()
+    allocation_candidates = {}
+    for sku in conflicts.index:
+        sku_data = combined[combined['SKU'] == sku]
+        demand_map = {
+            row['Store']: {
+                'demand': int(row['Units_Needed']),
+                'current_inv': int(row['Current_Inv'])
             }
-            allocation_candidates[sku] = {
-                'stores': list(sku_data['Store'].unique()),
-                'hq_qty': int(sku_data['HQ_Qty'].iloc[0]),
-                'demand_map': demand_map,
-                'oiq': int(sku_data['Order In Quantities'].iloc[0])
-                if 'Order In Quantities' in sku_data.columns else 1
-            }
+            for _, row in sku_data.iterrows()
+        }
+        allocation_candidates[sku] = {
+            'stores': list(sku_data['Store'].unique()),
+            'hq_qty': int(sku_data['HQ_Qty'].iloc[0]),
+            'demand_map': demand_map,
+            'oiq': int(sku_data['Order In Quantities'].iloc[0])
+            if 'Order In Quantities' in sku_data.columns else 1
+        }
 
-        return allocation_candidates
+    return allocation_candidates
 ```
 
 For each conflicting SKU, builds a rich info dict used entirely by the
@@ -951,51 +1196,69 @@ allocation UI (§13):
 - `hq_qty` — total HQ stock available to split.
 - `oiq` — case pack size, used as the input's step size.
 
-> **Why "explicit arguments" matters:** this function takes
-> `df_master`, `rules_matrix`, `selected_stores`, `hq_threshold` as real
-> parameters rather than silently reading global/session variables. That
-> means if it's ever wrapped in `@st.cache_data`, Streamlit's cache key is
-> based on the _actual content_ passed in — changing the HQ threshold
-> slider or catalog produces a different cache key and a fresh
-> recomputation, instead of silently returning a stale cached result keyed
-> on the wrong (or no) inputs.
+> **Why explicit arguments matters:** this function takes `df_master`,
+> `rules_matrix`, `selected_stores`, `hq_threshold` as real parameters
+> rather than reading global/session variables — same principle
+> `compute_store_order` follows (§11). Any future `@st.cache_data` wrapper
+> would key its cache on this function's actual arguments, so changing the
+> HQ threshold slider or catalog produces a different cache key and a
+> fresh recomputation instead of a stale cached result. It's also what
+> makes both functions honest module-level exports: `main.py` and
+> `ui_summary.py` can import and call them directly with whatever data
+> they have on hand, with no hidden dependency on Streamlit session state
+> or global variables defined elsewhere.
 
 ---
 
-## 13. The HQ Allocation UI
+## 13. The HQ Allocation UI — `ui_allocation.py`
 
-Only rendered `if allocation_candidates:` — i.e. only when at least one
-SKU has a genuine cross-store HQ conflict.
+This UI section is the most structurally changed by the module split: what
+used to be one large nested-function block inside `main.py` is now four
+separate functions in `ui_allocation.py`, each with a clear job:
+
+| Function | Role |
+|---|---|
+| `render_allocation_section(df_master, allocation_candidates, selected_stores)` | Public entry point — the only one `main.py` calls. Renders the conflicts table, delegates to the two functions below, and shows the summary once submitted. No-op if there are no conflicts. |
+| `render_sku_allocation(sku, info, selected_stores, df_master)` | An `@st.fragment` rendering one SKU's allocation inputs. |
+| `render_allocation_inputs(df_master, allocation_candidates, selected_stores)` | An `@st.fragment` wrapping the loop over every conflicting SKU, plus the Push button and its validation. |
+| `_render_allocation_summary(allocation_candidates, selected_stores)` | Private (leading underscore — not meant to be called from outside this module) — the post-push summary table. Only `render_allocation_section` calls it. |
+
+Only rendered if `allocation_candidates` is non-empty — i.e. only when at
+least one SKU has a genuine cross-store HQ conflict.
 
 ```python
-    if allocation_candidates:
-        st.divider()
-        st.subheader("⚙️ HQ Allocation (Insufficient Stock)")
-        st.caption(
-            "Items below have more demand than HQ can supply. Allocate HQ qty to stores; unallocated stores will order from vendors.")
+def render_allocation_section(df_master, allocation_candidates, selected_stores):
+    if not allocation_candidates:
+        return
+
+    st.divider()
+    st.subheader("⚙️ HQ Allocation (Insufficient Stock)")
+    st.caption(
+        "Items below have more demand than HQ can supply. Allocate HQ qty to stores; unallocated stores will order from vendors.")
 ```
 
-Section header + explanation.
+Section header + explanation, guarded by an early `return` if there's
+nothing to allocate.
 
 ```python
-        allocation_data = []
-        for sku in sorted(allocation_candidates.keys()):
-            info = allocation_candidates[sku]
-            item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
-                df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
-            hq_available = int(info['hq_qty'])
-            total_demand = sum(d['demand']
-                               for d in info['demand_map'].values())
-            shortage = total_demand - hq_available
-            allocation_data.append({
-                'SKU': sku, 'Item Name': item_name,
-                'HQ Available': hq_available, 'Total Demand': int(total_demand),
-                'Shortage': int(shortage),
-                'Stores Needing': ', '.join(info['stores'])
-            })
+    allocation_data = []
+    for sku in sorted(allocation_candidates.keys()):
+        info = allocation_candidates[sku]
+        item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
+            df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
+        hq_available = int(info['hq_qty'])
+        total_demand = sum(d['demand']
+                           for d in info['demand_map'].values())
+        shortage = total_demand - hq_available
+        allocation_data.append({
+            'SKU': sku, 'Item Name': item_name,
+            'HQ Available': hq_available, 'Total Demand': int(total_demand),
+            'Shortage': int(shortage),
+            'Stores Needing': ', '.join(info['stores'])
+        })
 
-        alloc_df = pd.DataFrame(allocation_data)
-        st.dataframe(alloc_df, width='stretch', hide_index=True)
+    alloc_df = pd.DataFrame(allocation_data)
+    st.dataframe(alloc_df, width='stretch', hide_index=True)
 ```
 
 Builds and displays a **read-only overview table**: one row per
@@ -1004,31 +1267,39 @@ summed across stores, the resulting shortage, and which stores are asking
 for it. Purely informational — the actual input widgets come next.
 
 ```python
-        if "hq_allocations" not in st.session_state:
-            st.session_state.hq_allocations = {}
-        for sku in allocation_candidates:
-            if sku not in st.session_state.hq_allocations:
-                st.session_state.hq_allocations[sku] = {}
+    if "hq_allocations" not in st.session_state:
+        st.session_state.hq_allocations = {}
+    for sku in allocation_candidates:
+        if sku not in st.session_state.hq_allocations:
+            st.session_state.hq_allocations[sku] = {}
+
+    st.write("**Allocate HQ Qty by Store:**")
+    st.info(
+        "👆 \"Remaining\" updates live as you type. Once everything looks "
+        "right, click **Push Allocations** to apply it to the store tabs below.")
+
+    render_allocation_inputs(df_master, allocation_candidates, selected_stores)
+
+    if st.session_state.get("allocations_submitted"):
+        _render_allocation_summary(allocation_candidates, selected_stores)
 ```
 
-Defensive initialization: guarantees every candidate SKU has at least an
-empty dict ready in `st.session_state.hq_allocations`, even the very first
-time it's encountered.
+Defensive initialization guarantees every candidate SKU has at least an
+empty dict ready in `st.session_state.hq_allocations`, then delegates the
+actual input rendering to `render_allocation_inputs`, and conditionally
+renders the summary afterward if allocations have been pushed.
+
+### 13.1 `render_sku_allocation` — one SKU's inputs, its own fragment
 
 ```python
-        st.write("**Allocate HQ Qty by Store:**")
-        st.info(
-            "👆 \"Remaining\" updates live as you type. Once everything looks "
-            "right, click **Push Allocations** to apply it to the store tabs below.")
-```
-
-### 13.1 `@st.fragment` for live updates
-
-```python
-        @st.fragment
-        def render_allocation_inputs():
-            ...
-        render_allocation_inputs()
+@st.fragment
+def render_sku_allocation(sku, info, selected_stores, df_master):
+    """
+    Renders the allocation inputs for ONE SKU. Wrapped in its own
+    @st.fragment so editing a number_input for this SKU only
+    reruns this SKU's block — not every other SKU's inputs in
+    the allocation list. Called from render_allocation_inputs().
+    """
 ```
 
 `st.fragment` is a Streamlit decorator that turns a function into an
@@ -1037,45 +1308,41 @@ fragment only reruns the fragment's code, not the entire script from the
 top. This is a deliberate performance/UX choice — without it, typing into
 one allocation number input would re-run the _entire_ app: reload the
 catalog handling, recompute every store tab, rebuild every Excel buffer,
-etc., on every keystroke. Wrapping just the allocation-input rendering in
-a fragment means "Remaining" recalculates live as you adjust numbers
-without that overhead, and without needing an explicit form-submit click
-just to see updated math.
+etc., on every keystroke.
 
-(Earlier iterations of this app used `st.form` here instead — batching all
-inputs and requiring an explicit Submit before anything recalculated. The
-fragment approach was adopted specifically so "Remaining" feels live; the
-tradeoff, discussed and deliberately accepted, is that a full-script rerun
-is still needed afterward via `st.rerun()` to propagate the final
-allocation into the store tabs, which live outside the fragment.)
-
-### 13.2 Rendering each conflicting SKU's inputs
+**A concrete effect of the module split:** before, this function was
+nested directly inside `main.py`'s big `if` block, so it could reach
+`df_master` and `selected_stores` as closure variables from the enclosing
+scope for free. Now that it's a genuine top-level function in its own
+module, those same values have to be passed in as explicit parameters —
+`render_sku_allocation(sku, info, selected_stores, df_master)`. This is a
+strict improvement, not just a mechanical necessity: the function's full
+data dependency is now visible in its signature instead of implicit in
+where it happened to be defined.
 
 ```python
-            for sku in sorted(allocation_candidates.keys()):
-                info = allocation_candidates[sku]
-                item_name = ...
-                hq_available = int(info['hq_qty'])
-                oiq = int(info['oiq'])
-                demand_map = info.get('demand_map', {})
+    item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
+        df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
+    hq_available = int(info['hq_qty'])
+    oiq = int(info['oiq'])
+    demand_map = info.get('demand_map', {})
 
-                st.markdown(f"**{sku}** — {item_name} (Case Pack: {oiq})")
+    st.markdown(f"**{sku}** — {item_name} (Case Pack: {oiq})")
 ```
 
-For each conflicting SKU (alphabetically sorted for a stable order), shows
-a bolded header line with the SKU, item name, and case pack size for
+Shows a bolded header line with the SKU, item name, and case pack size for
 context.
 
 ```python
-                relevant_stores = [
-                    s for s in selected_stores if s in info['stores']]
-                cards_per_row = 4
+    relevant_stores = [
+        s for s in selected_stores if s in info['stores']]
+    cards_per_row = 4
 
-                total_allocated = 0
-                for row_start in range(0, len(relevant_stores), cards_per_row):
-                    row_stores = relevant_stores[row_start:row_start + cards_per_row]
-                    row_cols = st.columns(cards_per_row)
-                    for col, store_code in zip(row_cols, row_stores):
+    total_allocated = 0
+    for row_start in range(0, len(relevant_stores), cards_per_row):
+        row_stores = relevant_stores[row_start:row_start + cards_per_row]
+        row_cols = st.columns(cards_per_row)
+        for col, store_code in zip(row_cols, row_stores):
 ```
 
 Only stores that actually need this SKU (`relevant_stores`) get an input —
@@ -1084,28 +1351,28 @@ no point cluttering the UI with a store that isn't in the conflict.
 (handles SKUs needed by more than 4 stores gracefully, e.g. all 11).
 
 ```python
-                        with col:
-                            if store_code not in st.session_state.hq_allocations[sku]:
-                                st.session_state.hq_allocations[sku][store_code] = 0
+            with col:
+                if store_code not in st.session_state.hq_allocations[sku]:
+                    st.session_state.hq_allocations[sku][store_code] = 0
 
-                            store_demand_info = demand_map.get(store_code, {})
-                            current_inv = int(store_demand_info.get('current_inv', 0))
-                            demand = int(store_demand_info.get('demand', 0))
+                store_demand_info = demand_map.get(store_code, {})
+                current_inv = int(store_demand_info.get('current_inv', 0))
+                demand = int(store_demand_info.get('demand', 0))
 
-                            max_alloc = max(min(int(hq_available), demand), 0)
+                max_alloc = max(min(int(hq_available), demand), 0)
 
-                            if st.session_state.hq_allocations[sku][store_code] > max_alloc:
-                                st.session_state.hq_allocations[sku][store_code] = max_alloc
+                if st.session_state.hq_allocations[sku][store_code] > max_alloc:
+                    st.session_state.hq_allocations[sku][store_code] = max_alloc
 
-                            allocated = st.number_input(
-                                f"{store_code}", 0, max_alloc,
-                                value=st.session_state.hq_allocations[sku][store_code],
-                                step=oiq,
-                                key=f"alloc_{sku}_{store_code}",
-                                width="stretch"
-                            )
-                            st.session_state.hq_allocations[sku][store_code] = allocated
-                            total_allocated += allocated
+                allocated = st.number_input(
+                    f"{store_code}", 0, max_alloc,
+                    value=st.session_state.hq_allocations[sku][store_code],
+                    step=oiq,
+                    key=f"alloc_{sku}_{store_code}",
+                    width="stretch"
+                )
+                st.session_state.hq_allocations[sku][store_code] = allocated
+                total_allocated += allocated
 ```
 
 For each store's input:
@@ -1126,169 +1393,191 @@ For each store's input:
 - `st.number_input(..., step=oiq, ...)` — the up/down stepper moves in
   whole-case increments, matching how the store would actually receive
   stock.
-- `width="stretch"` — the widget fills its column rather than a fixed
-  pixel width, so it doesn't leave odd gaps when columns resize.
 - Writes the (possibly user-changed) value back into session state and
   accumulates a running per-SKU total.
 
 ```python
-                            st.markdown(
-                                f"<div style='font-size:14px; width:100%; "
-                                f"margin-top:-6px;'>Has: <b>{current_inv}</b>"
-                                f" &nbsp;|&nbsp; Needs: <b>{demand}</b></div>",
-                                unsafe_allow_html=True
-                            )
+                st.markdown(
+                    f"<div style='font-size:14px; width:100%; "
+                    f"margin-top:-6px;'>Has: <b>{current_inv}</b>"
+                    f" &nbsp;|&nbsp; Needs: <b>{demand}</b></div>",
+                    unsafe_allow_html=True
+                )
+
+        if row_start + cards_per_row < len(relevant_stores):
+            st.markdown(
+                "<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
 ```
 
 A small raw-HTML caption directly under each input showing that store's
 current on-hand and demand, for context while deciding how much to
-allocate. `unsafe_allow_html=True` is required because Streamlit escapes
-HTML in `st.markdown` by default; this is safe here because the content is
-entirely built from already-validated numeric values, not arbitrary user
-or external input.
+allocate (`unsafe_allow_html=True` is safe here since the content is
+entirely built from already-validated numeric values). The second
+`st.markdown` just adds vertical breathing room between wrapped rows of
+inputs, only when another row is actually coming.
 
 ```python
-                    if row_start + cards_per_row < len(relevant_stores):
-                        st.markdown(
-                            "<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
-```
+    remaining = hq_available - total_allocated
+    rem_col = st.columns([3, 1])[1]
+    with rem_col:
+        st.metric(
+            "Remaining",
+            remaining,
+            delta=f"of {hq_available}",
+            delta_color="inverse" if remaining >= 0 else "off"
+        )
 
-Adds a little vertical breathing room between wrapped rows, only when
-there _is_ another row coming (avoids a trailing gap after the last row).
+    if remaining < 0:
+        st.error(
+            f"⚠️ Over-allocated by {abs(remaining)} units for SKU {sku}")
 
-```python
-                remaining = hq_available - total_allocated
-                rem_col = st.columns([3, 1])[1]
-                with rem_col:
-                    st.metric(
-                        "Remaining", remaining,
-                        delta=f"of {hq_available}",
-                        delta_color="inverse" if remaining >= 0 else "off"
-                    )
-
-                if remaining < 0:
-                    st.error(
-                        f"⚠️ Over-allocated by {abs(remaining)} units for SKU {sku}")
-
-                st.divider()
+    st.divider()
 ```
 
 After all of this SKU's store inputs, shows a `st.metric` "Remaining"
 counter (`hq_available - total_allocated`), right-aligned via a `[3, 1]`
 column split. `delta_color="inverse"` colors the delta red when positive
-and green when negative for _this specific metric semantics_
-(`"inverse"` just flips Streamlit's default green-is-up coloring — here
-it's used so a _large remaining amount_ doesn't read as alarmingly red).
-If the store inputs somehow still sum past `hq_available` (shouldn't
-normally happen given the `max_alloc` clamp, but is a defensive
-double-check), shows an explicit error. A divider closes out this SKU's
-block before starting the next one.
+and green when negative for _this specific metric semantics_ (`"inverse"`
+just flips Streamlit's default green-is-up coloring — here it's used so a
+_large remaining amount_ doesn't read as alarmingly red). If the store
+inputs somehow still sum past `hq_available` (shouldn't normally happen
+given the `max_alloc` clamp, but is a defensive double-check), shows an
+explicit per-SKU error. A divider closes out this SKU's block.
 
-### 13.3 Push button and over-allocation guard
+### 13.2 `render_allocation_inputs` — the outer fragment, push button, validation
 
 ```python
-            over_allocated_skus = []
-            for sku in sorted(allocation_candidates.keys()):
-                info = allocation_candidates[sku]
-                hq_available = int(info['hq_qty'])
-                total_allocated = sum(
-                    st.session_state.hq_allocations.get(sku, {}).get(store_code, 0)
-                    for store_code in selected_stores
-                    if store_code in info['stores']
-                )
-                if total_allocated > hq_available:
-                    over_allocated_skus.append(sku)
-
-            if over_allocated_skus:
-                st.error(
-                    f"❌ Cannot push — {len(over_allocated_skus)} SKU(s) are over-allocated: "
-                    f"{', '.join(over_allocated_skus)}. Reduce quantities before pushing."
-                )
-
-            pushed = st.button(
-                "🚀 Push Allocations", width="stretch",
-                disabled=bool(over_allocated_skus)
-            )
-            if pushed and not over_allocated_skus:
-                st.session_state.allocations_submitted = True
-                st.rerun()
+@st.fragment
+def render_allocation_inputs(df_master, allocation_candidates, selected_stores):
+    for sku in sorted(allocation_candidates.keys()):
+        info = allocation_candidates[sku]
+        render_sku_allocation(sku, info, selected_stores, df_master)
 ```
 
-A second, independent re-check across _all_ candidate SKUs (not just the
-one currently being rendered) for any over-allocation, building a list of
-offending SKUs. If any exist, shows a consolidated error message and
-**disables** the Push button (`disabled=bool(over_allocated_skus)`). This
-disabling is safe specifically _because_ this all lives inside an
-`@st.fragment` — since the fragment reruns on every input change, the
-disabled state is always freshly recalculated; there's no risk of a stuck
-button reflecting stale data (which was a real risk with the previous
-`st.form`-based version, since a form only recalculates on submit).
+Loops over every conflicting SKU (alphabetically sorted for a stable
+order) and calls `render_sku_allocation` for each — that inner call is
+itself an `@st.fragment`, so this is a fragment containing fragments:
+editing one SKU's number input reruns only that SKU's `render_sku_allocation`
+call, not this whole loop.
 
-When actually pushed (and nothing is over-allocated): flips
-`allocations_submitted` to `True`, then calls `st.rerun()` — an explicit
-**full-script rerun** (its default scope, as opposed to the fragment's
-local rerun) so that the store tabs and consolidated summary below, which
-live _outside_ this fragment and therefore wouldn't otherwise see the new
-allocation values, pick them up immediately.
+```python
+    # NOTE: this scan (and the button below) only re-executes when
+    # THIS outer fragment reruns. Since the number_inputs now live
+    # in nested per-SKU fragments, editing one won't rerun this
+    # outer fragment — so we can't proactively keep a `disabled=`
+    # flag in sync with live edits. Instead we validate fresh from
+    # session_state at the moment the button itself is clicked
+    # (a click on a widget in THIS fragment does rerun it), and
+    # show the error only on an invalid click rather than trying
+    # to track it continuously.
+    pushed = st.button("🚀 Push Allocations", width="stretch")
+    if pushed:
+        over_allocated_skus = []
+        for sku in sorted(allocation_candidates.keys()):
+            info = allocation_candidates[sku]
+            hq_available = int(info['hq_qty'])
+            total_allocated = sum(
+                st.session_state.hq_allocations.get(
+                    sku, {}).get(store_code, 0)
+                for store_code in selected_stores
+                if store_code in info['stores']
+            )
+            if total_allocated > hq_available:
+                over_allocated_skus.append(sku)
+
+        if over_allocated_skus:
+            st.error(
+                f"❌ Cannot push — {len(over_allocated_skus)} SKU(s) are over-allocated: "
+                f"{', '.join(over_allocated_skus)}. Reduce quantities before pushing."
+            )
+        else:
+            st.session_state.allocations_submitted = True
+            st.rerun()
+```
+
+The Push button is **not** preemptively disabled while any SKU is
+over-allocated. The comment explains exactly why: because the per-SKU
+inputs now live in their own nested fragments (§13.1), editing one of them
+does not rerun this outer fragment — so a `disabled=` flag computed here
+would only ever reflect stale data from the last time _this_ fragment
+happened to rerun, not the user's most recent edit. Instead, validation
+runs **fresh, at the moment the button is actually clicked** (a click on a
+widget inside this fragment does rerun it), scanning every candidate SKU's
+current session-state totals. If anything is over-allocated, it shows a
+consolidated error naming every offending SKU and does nothing further;
+only when nothing is over-allocated does it flip
+`allocations_submitted` and call `st.rerun()` — an explicit **full-script**
+rerun (as opposed to the fragment's local rerun) so the store tabs and
+consolidated summary below, which live entirely outside this fragment,
+pick up the newly pushed allocation values immediately.
+
+(Verified live: filling in allocation amounts that individually respect
+each store's own cap but jointly exceed `hq_available` correctly blocks
+the push with the "Cannot push" error and never reaches the summary
+section; a valid, fully-assigned allocation correctly reaches it.)
 
 ---
 
-## 14. Allocation Summary (post-push)
+## 14. Allocation Summary (post-push) — `_render_allocation_summary` in `ui_allocation.py`
 
 ```python
-        if st.session_state.get("allocations_submitted"):
-            st.divider()
-            st.subheader("📋 Allocation Summary")
+def _render_allocation_summary(allocation_candidates, selected_stores):
+    st.divider()
+    st.subheader("📋 Allocation Summary")
 
-            summary_rows = []
-            any_unassigned = False
+    summary_rows = []
+    any_unassigned = False
 
-            for sku in sorted(allocation_candidates.keys()):
-                info = allocation_candidates[sku]
-                hq_available = int(info['hq_qty'])
-                allocated_by_store = {
-                    store_code: st.session_state.hq_allocations.get(sku, {}).get(store_code, 0)
-                    for store_code in selected_stores
-                    if store_code in info['stores']
-                }
-                total_allocated = sum(allocated_by_store.values())
-                unassigned = hq_available - total_allocated
+    for sku in sorted(allocation_candidates.keys()):
+        info = allocation_candidates[sku]
+        hq_available = int(info['hq_qty'])
+        allocated_by_store = {
+            store_code: st.session_state.hq_allocations.get(sku, {}).get(store_code, 0)
+            for store_code in selected_stores
+            if store_code in info['stores']
+        }
+        total_allocated = sum(allocated_by_store.values())
+        unassigned = hq_available - total_allocated
 
-                skipped_stores = [
-                    s for s in info['stores']
-                    if allocated_by_store.get(s, 0) == 0
-                ]
+        skipped_stores = [
+            s for s in info['stores']
+            if allocated_by_store.get(s, 0) == 0
+        ]
 
-                if unassigned > 0:
-                    any_unassigned = True
+        if unassigned > 0:
+            any_unassigned = True
 
-                summary_rows.append({
-                    'SKU': sku, 'HQ Available': hq_available,
-                    'Total Allocated': total_allocated, 'Unassigned': unassigned,
-                    'Stores Getting 0 (→ Full Vendor Order)': ', '.join(skipped_stores) if skipped_stores else '—'
-                })
+        summary_rows.append({
+            'SKU': sku, 'HQ Available': hq_available,
+            'Total Allocated': total_allocated, 'Unassigned': unassigned,
+            'Stores Getting 0 (→ Full Vendor Order)': ', '.join(skipped_stores) if skipped_stores else '—'
+        })
 
-            summary_df = pd.DataFrame(summary_rows)
-            st.dataframe(summary_df, width='stretch', hide_index=True)
+    summary_df = pd.DataFrame(summary_rows)
+    st.dataframe(summary_df, width='stretch', hide_index=True)
 ```
 
-Once allocations have been pushed at least once, builds a summary table:
-per SKU, how much HQ stock is available, how much was actually allocated,
-how much is left unassigned, and which needing stores got _zero_
-allocation (meaning they'll fall through to a full vendor order for that
-SKU, per §11.5's `Suggested_HQ_Qty` logic).
+Called from `render_allocation_section` only once
+`st.session_state.allocations_submitted` is `True`. Builds a summary
+table: per SKU, how much HQ stock is available, how much was actually
+allocated, how much is left unassigned, and which needing stores got
+_zero_ allocation (meaning they'll fall through to a full vendor order for
+that SKU, per §11.5's `Suggested_HQ_Qty` logic — verified live: a
+conflict SKU left unallocated correctly disappears from that store's HQ
+Transfer list and appears instead in its Vendor Orders section for the
+store's full need).
 
 ```python
-            if any_unassigned:
-                st.warning(
-                    "⚠️ Some HQ stock above is unassigned. Stores listed in the last column "
-                    "received no allocation and will order their full need from the vendor instead, "
-                    "even though HQ has stock available. If this isn't intentional, scroll up and "
-                    "allocate before generating downloads."
-                )
-            else:
-                st.success(
-                    "✅ All available HQ stock has been assigned across stores.")
+    if any_unassigned:
+        st.warning(
+            "⚠️ Some HQ stock above is unassigned. Stores listed in the last column "
+            "received no allocation and will order their full need from the vendor instead, "
+            "even though HQ has stock available. If this isn't intentional, scroll up and "
+            "allocate before generating downloads."
+        )
+    else:
+        st.success(
+            "✅ All available HQ stock has been assigned across stores.")
 ```
 
 An explicit nudge: if any HQ stock is sitting unassigned, warn the user
@@ -1296,9 +1585,19 @@ before they go download files, since that means some stores will place a
 vendor order for stock HQ could have covered — nothing about this is
 silent or automatic.
 
+The leading underscore in `_render_allocation_summary` is a naming
+convention, not an enforced restriction — Python doesn't have real
+"private" functions. It signals "this is an implementation detail of
+`ui_allocation.py`, called only by `render_allocation_section` in the same
+file; don't import it directly from `main.py` or anywhere else."
+
 ---
 
 ## 15. Per-store tabs
+
+The tab loop itself stays in `main.py` (it's app orchestration, not a
+self-contained UI section); the content rendered _inside_ each tab moved
+to `render_store_tab()` in `ui_store_tab.py`.
 
 ```python
     tabs = st.tabs(selected_stores)
@@ -1312,28 +1611,64 @@ silent or automatic.
                     hq_threshold, allocation_candidates,
                     st.session_state.get("hq_allocations", {})
                 )
+
+                render_store_tab(short_name, long_name, data,
+                                 selected_vendor, date_str, hq_threshold)
+
+            else:
+                st.error(f"Missing column '{long_name}' in Catalog.")
 ```
 
 `st.tabs` creates one clickable tab per selected store code. Inside each
-tab, `compute_store_order` is called **again** — this time with the real
-`allocation_candidates` and the live `hq_allocations` from session state,
-so `Suggested_HQ_Qty` reflects any manual allocations actually pushed.
+tab, `compute_store_order` (imported from `ordering.py`) is called
+**again** — this time with the real `allocation_candidates` and the live
+`hq_allocations` from session state, so `Suggested_HQ_Qty` reflects any
+manual allocations actually pushed. The result is handed to
+`render_store_tab`, which now takes `hq_threshold` as an **explicit sixth
+parameter** — before the split, this value was captured as a closure
+variable from the enclosing sidebar scope; now that `render_store_tab`
+lives in its own module, it has to be passed in like everything else.
 
-### 15.1 HQ Transfer section
+### 15.1 `render_store_tab` — `ui_store_tab.py`
 
 ```python
-                st.subheader(f"🚛 HQ Transfer List: {short_name}")
-                st.caption(
-                    f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). Delete a row or set Qty to 0 to move it to the Vendor Order.")
+@st.fragment
+def render_store_tab(short_name, long_name, data, selected_vendor, date_str, hq_threshold):
+    """
+    Renders the HQ Transfer + Vendor Order UI for one store tab.
+    Wrapped in @st.fragment so editing a data_editor or clicking a
+    download button in THIS store's tab only reruns this function —
+    not the catalog load, rules matrix, other store tabs, or the
+    consolidated summary below. `data` is passed in fresh each full
+    script run (from compute_store_order), and is only recomputed
+    inside this fragment when the fragment itself reruns via one of
+    its own widgets.
+    """
+```
 
-                hq_display = data[data['Suggested_HQ_Qty'] > 0][[
-                    'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty'
-                ]].copy()
-                hq_display.rename(
-                    columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
+Wrapped in `@st.fragment` for the same reason as the allocation inputs
+(§13.1): without it, editing a `data_editor` cell or clicking a download
+button in one store's tab would rerun the entire app — reloading the
+catalog, recomputing every other store's order, rebuilding every other
+tab's Excel buffers — instead of just this one tab.
 
-                ed_hq = st.data_editor(hq_display, use_container_width=True,
-                                       hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
+#### HQ Transfer section
+
+```python
+    st.subheader(f"🚛 HQ Transfer List: {short_name}")
+    st.caption(
+        f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). Delete a row or set Qty to 0 to move it to the Vendor Order.")
+
+    hq_display = data[data['Suggested_HQ_Qty'] > 0][[
+        'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty'
+    ]].copy()
+    hq_display.rename(
+        columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
+
+    ed_hq = st.data_editor(hq_display, use_container_width=True,
+                           hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
+
+    ed_hq = ed_hq[ed_hq['SKU'].notna()].copy()
 ```
 
 Filters `data` down to just the rows that have a positive HQ suggestion,
@@ -1343,32 +1678,33 @@ lets the user delete rows entirely (e.g. "actually don't transfer this
 one, I'll vendor-order it instead") — deleting a row here effectively
 zeroes it out for the vendor-remainder calculation below, since the
 remainder math is keyed by `ed_hq`'s SKUs, not the original `data`. The
-`key=f"hq_ed_{short_name}"` gives each store's editor its own isolated
-state, since `st.data_editor` widgets need unique keys to not collide
-across tabs.
+`ed_hq['SKU'].notna()` filter drops any blank row Streamlit's editor
+leaves behind after a deletion. The `key=f"hq_ed_{short_name}"` gives each
+store's editor its own isolated state, since `st.data_editor` widgets need
+unique keys to not collide across tabs.
 
 ```python
-                if not ed_hq.empty:
-                    ed_hq_with_cost = ed_hq.merge(
-                        data[['SKU', 'Default Unit Cost']], on='SKU', how='left'
-                    )
-                    hq_cost = (
-                        ed_hq_with_cost['Transfer_Qty'] * ed_hq_with_cost['Default Unit Cost']).sum()
-                    st.metric("🏭 HQ Transfer Cost", f"${hq_cost:,.2f}")
+    if not ed_hq.empty:
+        ed_hq_with_cost = ed_hq.merge(
+            data[['SKU', 'Default Unit Cost']], on='SKU', how='left'
+        )
+        hq_cost = (
+            ed_hq_with_cost['Transfer_Qty'] * ed_hq_with_cost['Default Unit Cost']).sum()
+        st.metric("🏭 HQ Transfer Cost", f"${hq_cost:,.2f}")
 ```
 
 Re-joins unit cost back onto the (possibly user-edited) transfer table and
 shows the total dollar value of the HQ transfer as a metric.
 
 ```python
-                hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
-                data['Final_HQ_Qty'] = data['SKU'].map(
-                    lambda x: hq_final_map.get(x, 0))
-                data['Vendor_Units'] = (
-                    data['Total_Units_Needed'] - data['Final_HQ_Qty']).clip(lower=0)
-                data['Vendor_Cases'] = np.ceil(
-                    data['Vendor_Units'] / data['Order In Quantities']
-                )
+    hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
+    data['Final_HQ_Qty'] = data['SKU'].map(
+        lambda x: hq_final_map.get(x, 0))
+    data['Vendor_Units'] = (
+        data['Total_Units_Needed'] - data['Final_HQ_Qty']).clip(lower=0)
+    data['Vendor_Cases'] = np.ceil(
+        data['Vendor_Units'] / data['Order In Quantities']
+    )
 ```
 
 **This is the key link between the editable HQ table and the vendor
@@ -1383,123 +1719,102 @@ what makes "delete a row or set Qty to 0 to move it to the Vendor Order"
 remainder into the vendor order table below.
 
 ```python
-                if not ed_hq.empty:
-                    st.metric("Total Transfer Units", f"{int(ed_hq['Transfer_Qty'].sum())}")
-                    buf_hq = io.BytesIO()
-                    with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
-                        workbook = writer.book
-                        worksheet = workbook.add_worksheet('HQ_Transfer')
-                        writer.sheets['HQ_Transfer'] = worksheet
+    if not ed_hq.empty:
+        st.metric("Total Transfer Units",
+                  f"{int(ed_hq['Transfer_Qty'].sum())}")
+        buf_hq = io.BytesIO()
+        with pd.ExcelWriter(buf_hq, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            worksheet = workbook.add_worksheet('HQ_Transfer')
+            writer.sheets['HQ_Transfer'] = worksheet
+
+            store_header_fmt = workbook.add_format({
+                'bold': True, 'font_size': 14, 'align': 'left', 'valign': 'vcenter',
+            })
+            col_header_fmt = workbook.add_format({
+                'bold': True, 'bg_color': '#D9E1F2', 'border': 1,
+                'align': 'center', 'valign': 'vcenter',
+            })
+            cell_fmt = workbook.add_format({'border': 1, 'valign': 'vcenter'})
+            text_fmt = workbook.add_format({'num_format': '@', 'border': 1, 'valign': 'vcenter'})
 ```
 
-Starts building the downloadable HQ Transfer Excel file for this store.
-`io.BytesIO()` is an in-memory binary buffer — the file is built entirely
-in RAM, never written to disk, then handed straight to a download button.
-`pd.ExcelWriter(..., engine='xlsxwriter')` opens that buffer as an Excel
-workbook using the `xlsxwriter` engine specifically because it supports
-rich cell formatting (fonts, borders, colors) that this section relies on.
-A worksheet named `'HQ_Transfer'` is added manually (rather than via
-`df.to_excel`) because the layout needs a custom title row above the
-normal header row.
+Starts building the downloadable HQ Transfer Excel file for this store, in
+memory (`io.BytesIO()`, never touching disk). Four reusable cell format
+objects: a large bold format for the store-name title row, a
+bold-with-light-blue-background-and-border format for column headers, a
+plain bordered format for ordinary data cells, and a bordered-and-
+_text-formatted_ (`'num_format': '@'`) format specifically for the GTIN
+column — forcing Excel to treat GTIN values as text so it never
+auto-converts a long barcode into scientific notation or strips leading
+zeros, exactly mirroring the string-preservation logic already applied
+when the catalog was first loaded (§5.2).
 
 ```python
-                        store_header_fmt = workbook.add_format({
-                            'bold': True, 'font_size': 14, 'align': 'left', 'valign': 'vcenter',
-                        })
-                        col_header_fmt = workbook.add_format({
-                            'bold': True, 'bg_color': '#D9E1F2', 'border': 1,
-                            'align': 'center', 'valign': 'vcenter',
-                        })
-                        cell_fmt = workbook.add_format({'border': 1, 'valign': 'vcenter'})
-                        text_fmt = workbook.add_format({'num_format': '@', 'border': 1, 'valign': 'vcenter'})
-```
+            store_display_name = inv_store_map.get(
+                short_name, short_name).replace('Current Quantity ', '')
+            worksheet.write(
+                0, 0, f"HQ Transfer — {store_display_name}", store_header_fmt)
+            worksheet.set_row(0, 22)
 
-Four reusable cell format objects: a large bold format for the store-name
-title row, a bold-with-light-blue-background-and-border format for column
-headers, a plain bordered format for ordinary data cells, and a
-bordered-and-_text-formatted_ (`'num_format': '@'`) format specifically
-for the GTIN column — forcing Excel to treat GTIN values as text so it
-never auto-converts a long barcode into scientific notation or strips
-leading zeros, exactly mirroring the string-preservation logic already
-applied when the catalog was first loaded (§5.2).
+            for col_idx, col_name in enumerate(ed_hq.columns):
+                worksheet.write(
+                    1, col_idx, col_name, col_header_fmt)
 
-```python
-                        store_display_name = inv_store_map.get(
-                            short_name, short_name).replace('Current Quantity ', '')
+            gtin_col_idx = list(ed_hq.columns).index(
+                'GTIN') if 'GTIN' in ed_hq.columns else None
+            for row_idx, row in enumerate(ed_hq.itertuples(index=False), start=2):
+                for col_idx, value in enumerate(row):
+                    fmt = text_fmt if col_idx == gtin_col_idx else cell_fmt
+                    if pd.isna(value):
+                        worksheet.write_blank(
+                            row_idx, col_idx, None, fmt)
+                    else:
                         worksheet.write(
-                            0, 0, f"HQ Transfer — {store_display_name}", store_header_fmt)
-                        worksheet.set_row(0, 22)
+                            row_idx, col_idx, value, fmt)
+
+            worksheet.set_column('A:A', 12)
+            worksheet.set_column('B:B', 20)
+            worksheet.set_column('C:C', 40)
+            worksheet.set_column('D:F', 14)
 ```
 
-Row 0 (the very first row of the sheet) gets a human-readable title like
-"HQ Transfer — Crescent Commons" (stripping the `"Current Quantity "`
-prefix off the long store-map name for display purposes), styled with the
-bold large format, with the row height bumped to 22 so it doesn't look
-cramped.
+Row 0 gets a human-readable title like "HQ Transfer — Crescent Commons"
+(stripping the `"Current Quantity "` prefix off the long store-map name),
+styled bold/large with a bumped row height. Row 1 gets the actual column
+headers. Data rows start at index 2; `itertuples(index=False)` iterates
+rows as lightweight tuples (faster than `.iterrows()`), the GTIN column
+gets the text format, and `write_blank` handles any genuinely empty cell
+explicitly rather than writing the string `"nan"`. Explicit column widths
+make the exported file readable immediately without the recipient having
+to manually widen every column.
 
 ```python
-                        for col_idx, col_name in enumerate(ed_hq.columns):
-                            worksheet.write(1, col_idx, col_name, col_header_fmt)
+    st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
+                       file_name=f"{short_name}_{date_str}_HQ_{selected_vendor}.xlsx",
+                       key=f"dl_hq_{short_name}")
 ```
 
-Row 1 gets the actual column headers (`SKU`, `GTIN`, `Item Name`,
-`Transfer_Qty`, `Current_Inv`, `HQ_Qty` — whatever `ed_hq`'s columns
-currently are), styled with the blue header format.
+The `with pd.ExcelWriter(...) as writer:` block closes automatically,
+finalizing the workbook into `buf_hq`; `.getvalue()` extracts the raw
+bytes handed to `st.download_button`. The filename pattern is
+`{store_code}_{date}_HQ_{vendor}.xlsx` — store code leads, so files
+sort/group by store when dropped into a folder together, and no emoji
+ends up embedded in a filename.
+
+#### Vendor Order section
 
 ```python
-                        gtin_col_idx = list(ed_hq.columns).index(
-                            'GTIN') if 'GTIN' in ed_hq.columns else None
-                        for row_idx, row in enumerate(ed_hq.itertuples(index=False), start=2):
-                            for col_idx, value in enumerate(row):
-                                fmt = text_fmt if col_idx == gtin_col_idx else cell_fmt
-                                worksheet.write(row_idx, col_idx, value, fmt)
-```
-
-Finds which column index is `GTIN` (so it can be given the text format
-instead of the plain one), then writes every data row starting at row
-index 2 (below the title and header rows). `itertuples(index=False)`
-iterates rows as lightweight tuples (faster than `.iterrows()`, and
-`index=False` skips including the DataFrame's row index as a spurious
-first value).
-
-```python
-                        worksheet.set_column('A:A', 12)   # SKU
-                        worksheet.set_column('B:B', 20)   # GTIN
-                        worksheet.set_column('C:C', 40)   # Item Name
-                        worksheet.set_column('D:F', 14)   # Qty columns
-```
-
-Explicit column widths so the exported file is readable immediately
-without the recipient having to manually widen every column.
-
-```python
-                    st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
-                                       file_name=f"{short_name}_{date_str}_HQ_{selected_vendor}.xlsx",
-                                       key=f"dl_hq_{short_name}")
-```
-
-`with pd.ExcelWriter(...) as writer:` closes automatically at the end of
-the `with` block, finalizing the workbook into `buf_hq`. `buf_hq.getvalue()`
-extracts the raw bytes, handed to `st.download_button`. The filename
-pattern is `{store_code}_{date}_HQ_{vendor}.xlsx` — **store code leads**,
-per the filename-restructuring convention used throughout this app, so
-files sort/group by store when dropped into a folder together, and no
-emoji ends up embedded in a filename (which can cause encoding issues on
-some systems).
-
-### 15.2 Vendor Order section
-
-```python
-                st.subheader(f"🛒 Vendor Orders: {short_name}")
-                order_summary = data[data['Vendor_Units'] > 0][[
-                    'SKU', 'GTIN', 'Item Name', 'Vendor_Cases', 'Order In Quantities',
-                    'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
-                ]].copy().reset_index(drop=True)
-                order_summary.rename(columns={
-                    'Vendor_Cases': 'Order (Cases)',
-                    'Order In Quantities': 'Case Pack',
-                    'Vendor_Units': 'Total Units'
-                }, inplace=True)
+    st.subheader(f"🛒 Vendor Orders: {short_name}")
+    order_summary = data[data['Vendor_Units'] > 0][[
+        'SKU', 'GTIN', 'Item Name', 'Vendor_Cases', 'Order In Quantities',
+        'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
+    ]].copy().reset_index(drop=True)
+    order_summary.rename(columns={
+        'Vendor_Cases': 'Order (Cases)',
+        'Order In Quantities': 'Case Pack',
+        'Vendor_Units': 'Total Units'
+    }, inplace=True)
 ```
 
 Filters `data` down to rows that still need a vendor order (after the HQ
@@ -1507,14 +1822,15 @@ editor recalculation above), selects the relevant columns, and renames
 several to more human-friendly display labels.
 
 ```python
-                if not order_summary.empty:
-                    frozen_mask = order_summary['Item Name'].str.startswith(
-                        'FRZN', na=False)
+    if not order_summary.empty:
+        frozen_mask = order_summary['Item Name'].str.startswith(
+            'FRZN', na=False)
 
-                    for label, file_label, df_type in [
-                        ("📦 Dry Order", "Dry", order_summary[~frozen_mask]),
-                        ("❄️ Frozen Order", "Frozen", order_summary[frozen_mask])
-                    ]:
+        for label, file_label, df_type in [
+            ("📦 Dry Order", "Dry", order_summary[~frozen_mask]),
+            ("❄️ Frozen Order", "Frozen",
+             order_summary[frozen_mask])
+        ]:
 ```
 
 Splits the vendor order into two sub-orders — Dry and Frozen — based on
@@ -1523,100 +1839,98 @@ convention baked into how frozen SKUs are labeled in the catalog).
 `na=False` treats any missing/`NaN` item name as "not frozen" rather than
 raising. `label` is the emoji-decorated on-screen heading; `file_label` is
 the clean plain-string version (`"Dry"` / `"Frozen"`) used in the actual
-downloaded filename — this split exists specifically so exported
-filenames stay clean strings without emoji, while the in-app UI can still
-show the friendlier emoji heading.
+downloaded filename.
 
 ```python
-                        st.markdown(f"#### {label}")
-                        if not df_type.empty:
-                            ed_df = st.data_editor(df_type, use_container_width=True,
-                                                   hide_index=True, num_rows="dynamic",
-                                                   key=f"vend_{label}_{short_name}")
-                            cost = (ed_df['Total Units'] *
-                                    ed_df['Default Unit Cost']).sum()
-                            st.metric(f"{label} Cost", f"${cost:,.2f}")
+        st.markdown(f"#### {label}")
+        if not df_type.empty:
+            ed_df = st.data_editor(df_type, use_container_width=True,
+                                   hide_index=True, num_rows="dynamic",
+                                   key=f"vend_{label}_{short_name}")
+
+            ed_df = ed_df[ed_df['SKU'].notna()].copy()
+            if ed_df.empty:
+                st.write("No items in this category.")
+                continue
+
+            cost = (ed_df['Total Units'] *
+                    ed_df['Default Unit Cost']).sum()
+            st.metric(f"{label} Cost", f"${cost:,.2f}")
 ```
 
 Each sub-order (Dry, then Frozen) gets its own editable table (again
-letting the user delete/adjust rows before exporting) and a cost metric
-computed off whatever's currently in the editor.
+letting the user delete/adjust rows before exporting), drops any blank
+row left behind by a deletion, and shows a cost metric computed off
+whatever's currently in the editor.
 
 ```python
-                            export_df = ed_df[[
-                                'GTIN', 'Item Name', 'Order (Cases)', 'Case Pack']].copy()
-                            export_df['Order (Cases)'] = export_df.apply(
-                                lambda r: f"{int(r['Order (Cases)'])} case" +
-                                ('s' if int(r['Order (Cases)']) != 1 else '')
-                                if r['Case Pack'] > 1 else str(int(r['Order (Cases)'])),
-                                axis=1
-                            )
-                            export_df = export_df.drop(columns=['Case Pack'])
-                            export_df = export_df.rename(
-                                columns={'Order (Cases)': 'Order'})
+            export_df = ed_df[[
+                'GTIN', 'Item Name', 'Order (Cases)', 'Case Pack']].copy()
+            export_df['Order (Cases)'] = export_df.apply(
+                lambda r: f"{int(r['Order (Cases)'])} case" +
+                ('s' if int(r['Order (Cases)']) != 1 else '')
+                if r['Case Pack'] > 1 else str(int(r['Order (Cases)'])),
+                axis=1
+            )
+            export_df = export_df.drop(columns=['Case Pack'])
+            export_df = export_df.rename(
+                columns={'Order (Cases)': 'Order'})
 ```
 
-Builds the actual exported column set: `GTIN`, `Item Name`, the order
-quantity, and (temporarily) `Case Pack` — kept only long enough to decide
-formatting. The `.apply(..., axis=1)` row-by-row transform is the
-**inline case labeling** feature: for any item whose case pack is greater
-than 1, the order quantity is rendered as a string like `"3 cases"` or
-`"1 case"` (correct singular/plural via the ternary on the exact count);
-for single-unit items (`Case Pack == 1`), it's just the bare integer as a
-string (e.g. `"5"`), since "case" language would be misleading for a
-per-unit item. `Case Pack` is then dropped (it was only needed to decide
-the formatting, not to be shown in the final file) and the column is
-renamed from the internal `'Order (Cases)'` label to the simpler,
+Builds the actual exported column set. The `.apply(..., axis=1)`
+row-by-row transform is the **inline case labeling** feature: for any item
+whose case pack is greater than 1, the order quantity is rendered as a
+string like `"3 cases"` or `"1 case"` (correct singular/plural via the
+ternary on the exact count); for single-unit items (`Case Pack == 1`),
+it's just the bare integer as a string, since "case" language would be
+misleading for a per-unit item. `Case Pack` is then dropped (only needed
+to decide the formatting) and the column renamed to the simpler,
 vendor-facing `'Order'` header.
 
 ```python
-                            buf = io.BytesIO()
-                            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-                                export_df.to_excel(
-                                    writer, index=False, sheet_name='Vendor_Order')
-                                text_fmt = writer.book.add_format({'num_format': '@'})
-                                writer.sheets['Vendor_Order'].set_column('A:A', 20, text_fmt)
-                                writer.sheets['Vendor_Order'].set_column('B:B', 40)
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+                export_df.to_excel(
+                    writer, index=False, sheet_name='Vendor_Order')
+                text_fmt = writer.book.add_format(
+                    {'num_format': '@'})
+                writer.sheets['Vendor_Order'].set_column(
+                    'A:A', 20, text_fmt)
+                writer.sheets['Vendor_Order'].set_column(
+                    'B:B', 40)
+            st.download_button(f"📥 Download {label}", buf.getvalue(),
+                               file_name=f"{short_name}_{date_str}_{file_label}.xlsx",
+                               key=f"dl_{label}_{short_name}")
+        else:
+            st.write("No items in this category.")
+    else:
+        st.success(
+            "No vendor order needed (Items may be covered by HQ).")
 ```
 
 Unlike the HQ Transfer sheet (built manually cell-by-cell for the custom
 title row), the Vendor Order sheet is simpler: `export_df.to_excel(...)`
-writes it directly with a normal header row at the top. Column A (`GTIN`)
-is set to text format for the same barcode-preservation reason as before;
-column B (`Item Name`) just gets a wider width for readability.
+writes it directly with a normal header row. Download button filename
+pattern is `{store_code}_{date}_{Dry|Frozen}.xlsx`. If a particular
+sub-order has no rows, shows a plain message instead of an empty
+table/download; if the store needs no vendor order at all, shows a
+success message instead of the whole section.
 
-```python
-                            st.download_button(f"📥 Download {label}", buf.getvalue(),
-                                               file_name=f"{short_name}_{date_str}_{file_label}.xlsx",
-                                               key=f"dl_{label}_{short_name}")
-                        else:
-                            st.write("No items in this category.")
-                else:
-                    st.success(
-                        "No vendor order needed (Items may be covered by HQ).")
-```
-
-Download button with filename `{store_code}_{date}_{Dry|Frozen}.xlsx` —
-again store-code-first, clean plain-text category name, no emoji. If a
-particular sub-order (Dry or Frozen) has no rows, shows a plain message
-instead of an empty table/download. If the store needs _no_ vendor order
-at all (fully covered by HQ or nothing to reorder), shows a success
-message instead of the whole section.
-
-```python
-            else:
-                st.error(f"Missing column '{long_name}' in Catalog.")
-```
-
-If this store's expected column simply isn't present in the uploaded
-catalog at all (e.g. store not included in this particular Square export),
-shows an error in that store's tab rather than crashing.
+(Verified live against a real catalog + rules matrix: HQ Transfer cost,
+Dry Order cost, and both `.xlsx` downloads for a real store all produced
+correct, valid files with the expected quantities and costs. The Frozen
+Order path specifically wasn't exercised, since neither test dataset
+happened to include a `FRZN`-prefixed item — the code is unchanged from
+before the split, but worth a real test with frozen inventory before
+fully trusting that branch.)
 
 ---
 
-## 16. Consolidated Order Summary
+## 16. Consolidated Order Summary — `render_consolidated_summary` in `ui_summary.py`
 
 ```python
+def render_consolidated_summary(df_master, rules_matrix, hq_col, hq_threshold, selected_stores,
+                                allocation_candidates, hq_allocations, date_str, selected_vendor):
     st.divider()
     st.subheader("📊 Consolidated Order Summary")
     st.caption("Total items being ordered across all stores (vendor + HQ)")
@@ -1630,8 +1944,7 @@ shows an error in that store's tab rather than crashing.
 
         data = compute_store_order(
             short_name, df_master, rules_matrix, hq_col,
-            hq_threshold, allocation_candidates,
-            st.session_state.get("hq_allocations", {})
+            hq_threshold, allocation_candidates, hq_allocations
         )
 
         order_items = data[data['Total_Units_Needed'] > 0][[
@@ -1644,33 +1957,45 @@ shows an error in that store's tab rather than crashing.
         order_items['HQ_Units'] = order_items['Suggested_HQ_Qty']
 
         all_orders.append(order_items)
+
+    if not all_orders:
+        return
 ```
 
-Runs `compute_store_order` **once more, per store** (third time this
-function has been called for each store across the whole script —
-accepted redundancy for simplicity/correctness, as noted in §12) to
-rebuild a fresh order table per store, this time collecting every store
-with a real need into a list of small per-store DataFrames tagged with a
-`Store` column. Note this reads `Suggested_HQ_Qty` here, **not** the
-per-tab-edited `Final_HQ_Qty` — meaning the consolidated summary reflects
-the _system-suggested_ HQ split, not any row-level edits a user made
-inside a specific store tab's data editor. That's a meaningful distinction
-worth remembering if the consolidated numbers ever look slightly different
-from what you'd expect after manually editing a tab.
+Like `render_store_tab`, this function now takes `hq_threshold` as an
+explicit parameter — the pre-split version read it as a closure variable
+from `main.py`'s sidebar scope. `main.py` passes it through explicitly
+(§7/§15). Runs `compute_store_order` (imported from `ordering.py`) **once
+more, per store** (the third call site for this function across the whole
+app — see the accepted-redundancy note in §12) to rebuild a fresh order
+table per store, collecting every store with a real need into a list of
+small per-store DataFrames tagged with a `Store` column.
+
+An early `return` replaces what used to be an outer `if all_orders:`
+block — since this whole function's body used to be nested inside
+`main.py`'s larger `if` statement, an early return here is the equivalent
+"do nothing if there's nothing to show" guard now that it's a standalone
+function.
+
+Note this reads `Suggested_HQ_Qty` here, **not** the per-tab-edited
+`Final_HQ_Qty` from `ui_store_tab.py` — meaning the consolidated summary
+reflects the _system-suggested_ HQ split, not any row-level edits a user
+made inside a specific store tab's data editor. That's a meaningful
+distinction worth remembering if the consolidated numbers ever look
+slightly different from what you'd expect after manually editing a tab.
 
 ```python
-    if all_orders:
-        combined_orders = pd.concat(all_orders, ignore_index=True)
+    combined_orders = pd.concat(all_orders, ignore_index=True)
 
-        summary = combined_orders.groupby('SKU').agg({
-            'GTIN': 'first', 'Item Name': 'first', 'Order In Quantities': 'first',
-            'Vendor_Units': 'sum', 'HQ_Units': 'sum', 'Default Unit Cost': 'first'
-        }).reset_index()
+    summary = combined_orders.groupby('SKU').agg({
+        'GTIN': 'first', 'Item Name': 'first', 'Order In Quantities': 'first',
+        'Vendor_Units': 'sum', 'HQ_Units': 'sum', 'Default Unit Cost': 'first'
+    }).reset_index()
 
-        summary = summary[summary['Vendor_Units'] > 0].copy()
+    summary = summary[summary['Vendor_Units'] > 0].copy()
 
-        summary['Total_Units'] = summary['Vendor_Units']
-        summary['Total_Cost'] = summary['Total_Units'] * summary['Default Unit Cost']
+    summary['Total_Units'] = summary['Vendor_Units']
+    summary['Total_Cost'] = summary['Total_Units'] * summary['Default Unit Cost']
 ```
 
 Stacks every store's order rows together, then groups by `SKU` — summing
@@ -1678,74 +2003,73 @@ Stacks every store's order rows together, then groups by `SKU` — summing
 (so if three stores each need 2 cases of the same item, this shows the
 combined 6). `GTIN`/`Item Name`/`Order In Quantities`/`Default Unit Cost`
 are assumed identical across stores for the same SKU, so `'first'` is
-sufficient. Filters down to only SKUs with a nonzero _vendor_ total
-(`summary['Vendor_Units'] > 0`) — this consolidated download is
-specifically a **vendor purchase order**, so SKUs fully covered by HQ
-transfers (zero vendor units) are intentionally excluded. `Total_Units`
-and `Total_Cost` are then just aliases/derived columns for display.
+sufficient. Filters down to only SKUs with a nonzero _vendor_ total — this
+consolidated download is specifically a **vendor purchase order**, so
+SKUs fully covered by HQ transfers are intentionally excluded.
 
 ```python
-        display_summary = summary[[
-            'SKU', 'GTIN', 'Item Name', 'Order In Quantities', 'Total_Units', 'Default Unit Cost', 'Total_Cost'
-        ]].copy().rename(columns={
-            'Order In Quantities': 'Case Pack', 'Default Unit Cost': 'Unit Cost',
-            'Total_Units': 'Qty to Order', 'Total_Cost': 'Total $'
-        })
+    display_summary = summary[[
+        'SKU', 'GTIN', 'Item Name', 'Order In Quantities', 'Total_Units', 'Default Unit Cost', 'Total_Cost'
+    ]].copy().rename(columns={
+        'Order In Quantities': 'Case Pack', 'Default Unit Cost': 'Unit Cost',
+        'Total_Units': 'Qty to Order', 'Total_Cost': 'Total $'
+    })
 
-        st.dataframe(display_summary, use_container_width=True, hide_index=True)
+    st.dataframe(display_summary, use_container_width=True, hide_index=True)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Items", len(summary))
+    with col2:
+        st.metric("Total Units Ordered", int(summary['Total_Units'].sum()))
+    with col3:
+        st.metric("Total Order Value", f"${summary['Total_Cost'].sum():,.2f}")
 ```
 
-A friendlier-labeled, read-only preview table shown directly in the app.
+A friendlier-labeled, read-only preview table, followed by three
+side-by-side headline metrics: how many distinct SKUs are being ordered
+from the vendor, total unit count across all of them, and total dollar
+value of the whole vendor order — a quick sanity check before placing a
+real purchase order.
 
 ```python
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Items", len(summary))
-        with col2:
-            st.metric("Total Units Ordered", int(summary['Total_Units'].sum()))
-        with col3:
-            st.metric("Total Order Value", f"${summary['Total_Cost'].sum():,.2f}")
-```
+    st.divider()
+    export_summary = summary[[
+        'GTIN', 'Item Name', 'Order In Quantities', 'Vendor_Units'
+    ]].copy().rename(columns={
+        'Order In Quantities': 'Case Pack', 'Vendor_Units': 'Order Qty'
+    })
 
-Three side-by-side headline metrics: how many distinct SKUs are being
-ordered from the vendor, total unit count across all of them, and total
-dollar value of the whole vendor order — a quick sanity check before
-placing a real purchase order.
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+        export_summary.to_excel(
+            writer, index=False, sheet_name='Consolidated_Order')
+        text_fmt = writer.book.add_format({'num_format': '@'})
+        writer.sheets['Consolidated_Order'].set_column('A:A', 20, text_fmt)
+        writer.sheets['Consolidated_Order'].set_column('B:B', 40)
 
-```python
-        st.divider()
-        export_summary = summary[[
-            'GTIN', 'Item Name', 'Order In Quantities', 'Vendor_Units'
-        ]].copy().rename(columns={
-            'Order In Quantities': 'Case Pack', 'Vendor_Units': 'Order Qty'
-        })
-
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-            export_summary.to_excel(
-                writer, index=False, sheet_name='Consolidated_Order')
-            text_fmt = writer.book.add_format({'num_format': '@'})
-            writer.sheets['Consolidated_Order'].set_column('A:A', 20, text_fmt)
-            writer.sheets['Consolidated_Order'].set_column('B:B', 40)
-
-        st.download_button(
-            "📥 Download Consolidated Order Summary",
-            buf.getvalue(),
-            file_name=f"{date_str}_{selected_vendor}_CONSOLIDATED_ORDER.xlsx",
-            key="dl_consolidated"
-        )
+    st.download_button(
+        "📥 Download Consolidated Order Summary",
+        buf.getvalue(),
+        file_name=f"{date_str}_{selected_vendor}_CONSOLIDATED_ORDER.xlsx",
+        key="dl_consolidated"
+    )
 ```
 
 Builds and offers the final downloadable file: one combined vendor order
 across every selected store, with GTIN, item name, case pack, and total
 order quantity. Note this file's naming pattern is
 `{date}_{vendor}_CONSOLIDATED_ORDER.xlsx` — date-first here rather than
-store-code-first, which makes sense since this file isn't scoped to a
-single store the way the per-store exports are.
+store-code-first, since this file isn't scoped to a single store the way
+the per-store exports are.
+
+(Verified live: totals here matched the sum of the individual store tabs'
+own numbers for the same test data, and the downloaded `.xlsx` opened
+correctly with the right columns and values.)
 
 ---
 
-## 17. Welcome / empty states
+## 17. Welcome / empty states — `main.py`
 
 ```python
 elif not selected_stores:
@@ -1777,19 +2101,22 @@ elif rules_matrix is None:
 These are the `elif` branches on the _outermost_ `if catalog_file and
 rules_matrix is not None and selected_stores:` from §10 — they cover every
 way the three prerequisites can be incomplete, each with a targeted,
-helpful message instead of a blank page:
+helpful message instead of a blank page. This section stayed in `main.py`
+rather than moving to its own module since it's a handful of lines
+directly tied to the top-level guard, not an independent UI concern.
 
 - No store selected → warning telling you to pick one.
 - No catalog uploaded → a full onboarding block with numbered
-  step-by-step instructions for pulling the correct export out of Square
-  (Items → Item Library → filter by vendor → Export Library → filtered
-  export), plus a reference screenshot loaded from a local image file. The
+  step-by-step instructions for pulling the correct export out of Square,
+  plus a reference screenshot loaded from a local image file. The
   `try`/`except` around `st.image` prevents a missing image file from
   crashing the whole welcome screen — it just shows a plain warning
   instead if the file isn't found. **Note:** this relies on a local file
-  at `./assets/Export Example.png` relative to wherever `streamlit
-run` is launched from — if you rebuild this project fresh, recreate that
-  `assets/` folder alongside `main.py` and drop a reference
+  at `./assets/Export Example.png` relative to wherever `streamlit run`
+  is launched from (moved here from a previous `Data/Images/` location
+  during the same cleanup that removed the unused `Data/Catalog` and
+  `Data/Rules` folders) — if you rebuild this project fresh, recreate
+  that `assets/` folder alongside `main.py` and drop a reference
   screenshot in it (or update the path).
 - Catalog uploaded and store(s) selected, but rules matrix not loaded yet
   → warning pointing at the vendor dropdown + load button.
@@ -1802,14 +2129,14 @@ run` is launched from — if you rebuild this project fresh, recreate that
 Square export (.xlsx)              Google Sheet (per vendor)
         │                                   │
         ▼                                   ▼
-  load_catalog() ──────────┐        load_rules_from_sheets()
+  catalog.load_catalog() ──┐        google_sheets.load_rules_from_sheets()
   (df_master)               │                │
         │                   │                ▼
         │             (filtered to catalog SKUs)
         │                   │                │
         └─────────────┬─────┴────────────────┘
                        ▼
-            compute_store_order(store)
+          ordering.compute_store_order(store)
               per-store merge + rules:
               Needs_Order → Total_Units_Needed
               (round-half-up, floor of 1 case,
@@ -1817,52 +2144,83 @@ Square export (.xlsx)              Google Sheet (per vendor)
                        │
         ┌──────────────┼───────────────────┐
         ▼                                   ▼
-get_allocation_candidates()      Suggested_HQ_Qty / Vendor_Units
-  (cross-store HQ conflicts)      (per store, per SKU)
+ordering.get_allocation_candidates()   Suggested_HQ_Qty / Vendor_Units
+  (cross-store HQ conflicts)            (per store, per SKU)
         │                                   │
         ▼                                   ▼
- Allocation UI (fragment)          Store tabs:
-  → hq_allocations{sku}{store}      - HQ Transfer editor + .xlsx
-        │                            - Vendor Order (Dry/Frozen)
-        └───────────────►             editors + .xlsx each
+ui_allocation.py (fragments)        main.py tab loop →
+  → hq_allocations{sku}{store}       ui_store_tab.render_store_tab():
+        │                             - HQ Transfer editor + .xlsx
+        └───────────────►             - Vendor Order (Dry/Frozen)
+                                        editors + .xlsx each
                                               │
                                               ▼
-                                 Consolidated Order Summary
+                                ui_summary.render_consolidated_summary()
                                   (all stores combined) + .xlsx
 ```
 
 Everything ultimately traces back to one function,
-`compute_store_order`, called with different `hq_allocations` /
-`allocation_candidates` inputs at different points in the script, always
-returning the same shape of DataFrame that every UI section and export
-downstream consumes identically.
+`ordering.compute_store_order`, called with different `hq_allocations` /
+`allocation_candidates` inputs from three different modules
+(`main.py`'s tab loop, `ordering.get_allocation_candidates` itself, and
+`ui_summary.render_consolidated_summary`), always returning the same
+shape of DataFrame that every UI section and export downstream consumes
+identically. The module boundaries drawn here follow this diagram almost
+exactly — each box is (part of) one file.
 
 ---
 
 ## 19. Known open items (as of this version)
 
 - The **"Excluded SKUs"** sheet tab (second tab on each vendor's rules
-  Google Sheet) documents intentionally-discontinued SKUs, but `main.py`
-  only ever reads `.sheet1` — it never opens or validates against that
-  tab. Unmatched catalog SKUs are currently only surfaced via a
-  server-console `print` (§10), not cross-checked against that documented
-  exclusion list. A natural next feature: read the Excluded SKUs tab in
-  `load_rules_from_sheets` (or a sibling function) and, for any unmatched
-  SKU, report explicitly whether it was intentionally excluded or is a
-  genuinely new/unrecognized item worth investigating.
+  Google Sheet) documents intentionally-discontinued SKUs, but
+  `google_sheets.py` only ever reads `.sheet1` — it never opens or
+  validates against that tab. Unmatched catalog SKUs are currently only
+  surfaced via a server-console `print` (§10), not cross-checked against
+  that documented exclusion list. A natural next feature: read the
+  Excluded SKUs tab in `load_rules_from_sheets` (or a sibling function)
+  and, for any unmatched SKU, report explicitly whether it was
+  intentionally excluded or is a genuinely new/unrecognized item worth
+  investigating.
 - `current_tab` in session state is initialized but not currently read by
   any widget — a placeholder for a possible future "remember which store
   tab was open" feature.
+- The Frozen Order path in `ui_store_tab.py` (any item whose name starts
+  with `FRZN`) is unchanged code from before the module split but wasn't
+  exercised by either round of post-split testing (neither the real
+  catalog nor the synthetic conflict-testing data happened to include a
+  frozen item) — worth a real test with frozen inventory before fully
+  trusting that branch.
+- Interactive editing inside the `st.data_editor` grids (deleting a row,
+  hand-adjusting a quantity) was verified by reading the code path
+  carefully but not driven end-to-end through the browser during the
+  module-split testing — only the read/render path and the downstream
+  Excel exports were confirmed against real and synthetic data.
 
 ---
 
-## 20. Local dev workflow reminder
+## 20. Local dev workflow
 
-Because this Claude Project treats uploaded files as **read-only**, any
-edit to `main.py` made in a session here must be **downloaded** from
-`/mnt/user-data/outputs/main.py` and manually used to replace your local
-copy — there is no auto-sync back into the project. After replacing the
-local file, restart `streamlit run main.py` (or let Streamlit's
-auto-reload pick up the change) and re-test against real catalog/rules
-data before moving on to the next change, per the test-before-proceed
-discipline used throughout this project's history.
+The app lives in a normal git repository (not a Claude Projects
+file-upload sandbox), so the workflow is the ordinary one:
+
+1. Edit files directly in the repo with your editor/IDE of choice.
+2. Run `streamlit run main.py` locally and exercise the change in the
+   browser — Streamlit auto-reloads on file save, so you don't need to
+   restart it between edits.
+3. Because `ordering.py` has no Streamlit dependency, the core math can
+   also be sanity-checked directly from a plain Python shell or script:
+   load a real catalog/rules file with `pandas.read_excel`, call
+   `compute_store_order(...)` or `get_allocation_candidates(...)`
+   directly, and inspect the resulting DataFrame — no need to click
+   through the UI just to verify a number.
+4. Commit changes with `git commit`, working on a feature branch
+   (`git checkout -b ...`) for anything beyond a trivial fix, and open a
+   PR / merge to `main` when it's tested.
+5. The app is connected to Streamlit Community Cloud via this repo's
+   GitHub integration — pushing to `main` triggers an automatic redeploy.
+   Since Streamlit Cloud does a fresh `pip install -r requirements.txt` on
+   every deploy, always verify `pip install --dry-run -r requirements.txt`
+   succeeds locally before pushing a dependency change to `main` (see the
+   §2.1 note on the pandas/streamlit version conflict this project
+   already hit once).
