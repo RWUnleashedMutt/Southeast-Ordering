@@ -160,7 +160,7 @@ elif not catalog_file:
         st.subheader("📸 Reference Settings")
         try:
             st.image("./assets/Export Example.png",
-                     use_container_width=True, caption="Select the 'Filtered' option.")
+                     width="stretch", caption="Select the 'Filtered' option.")
         except:
             st.warning("Reference image not found.")
 elif rules_matrix is None:

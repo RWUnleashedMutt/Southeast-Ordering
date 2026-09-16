@@ -32,7 +32,7 @@ def render_store_tab(short_name, long_name, data, selected_vendor, date_str, hq_
     hq_display.rename(
         columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
 
-    ed_hq = st.data_editor(hq_display, use_container_width=True,
+    ed_hq = st.data_editor(hq_display, width="stretch",
                            hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
 
     ed_hq = ed_hq[ed_hq['SKU'].notna()].copy()
@@ -142,7 +142,7 @@ def render_store_tab(short_name, long_name, data, selected_vendor, date_str, hq_
         ]:
             st.markdown(f"#### {label}")
             if not df_type.empty:
-                ed_df = st.data_editor(df_type, use_container_width=True,
+                ed_df = st.data_editor(df_type, width="stretch",
                                        hide_index=True, num_rows="dynamic",
                                        key=f"vend_{label}_{short_name}")
 

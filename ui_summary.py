@@ -65,7 +65,7 @@ def render_consolidated_summary(df_master, rules_matrix, hq_col, hq_threshold, s
     })
 
     st.dataframe(display_summary,
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
 
     col1, col2, col3 = st.columns(3)
     with col1:
