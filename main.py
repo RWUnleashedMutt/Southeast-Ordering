@@ -2,7 +2,7 @@ import streamlit as st
 from datetime import datetime
 
 from catalog import load_catalog
-from google_sheets import load_rules_from_sheets
+from google_sheets import load_rules_from_sheets, load_reserved_stock
 from ordering import compute_store_order, get_allocation_candidates
 from ui_sidebar import render_sidebar
 from ui_allocation import render_allocation_section
@@ -73,6 +73,21 @@ if catalog_file and rules_matrix is not None and selected_stores:
         st.error(f"❌ Missing column: '{hq_col}'")
         st.stop()
 
+    try:
+        reserved_map = load_reserved_stock()
+    except Exception as e:
+        st.warning(
+            f"⚠️ Could not load reserved-stock sheet — reserved-for-events "
+            f"stock will NOT be excluded from HQ availability this run: {e}")
+        reserved_map = {}
+
+    df_master['Reserved_Qty'] = df_master['SKU'].map(
+        reserved_map).fillna(0)
+
+    available_hq_col = 'Available Quantity HQ'
+    df_master[available_hq_col] = (
+        df_master[hq_col] - df_master['Reserved_Qty']).clip(lower=0)
+
     matched = len(rules_matrix['SKU'].unique())
     total = len(catalog_skus)
 
@@ -96,7 +111,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
             print(f"\nWARNING: {len(unmatched_skus)} unmatched SKUs found (names omitted — non-ASCII console).")
 
     allocation_candidates = get_allocation_candidates(
-        df_master, rules_matrix, hq_col, selected_stores, hq_threshold
+        df_master, rules_matrix, available_hq_col, selected_stores, hq_threshold
     )
 
     render_allocation_section(df_master, allocation_candidates, selected_stores)
@@ -108,7 +123,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
         with tabs[i]:
             if long_name in df_master.columns:
                 data = compute_store_order(
-                    short_name, df_master, rules_matrix, hq_col,
+                    short_name, df_master, rules_matrix, available_hq_col,
                     hq_threshold, allocation_candidates,
                     st.session_state.get("hq_allocations", {})
                 )
@@ -120,7 +135,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
                 st.error(f"Missing column '{long_name}' in Catalog.")
 
     render_consolidated_summary(
-        df_master, rules_matrix, hq_col, hq_threshold, selected_stores,
+        df_master, rules_matrix, available_hq_col, hq_threshold, selected_stores,
         allocation_candidates, st.session_state.get("hq_allocations", {}),
         date_str, selected_vendor
     )

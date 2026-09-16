@@ -3,7 +3,7 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-from config import SCOPES, SHEET_IDS
+from config import SCOPES, SHEET_IDS, RESERVED_STOCK_SHEET_ID
 from catalog import clean_id
 
 
@@ -44,3 +44,20 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
                 df[col] = converted
 
     return df
+
+
+@st.cache_data(ttl=3600)  # Cache for one hour
+def load_reserved_stock() -> dict:
+    """Pull SKU -> qty reserved for other events from the reserved stock
+    sheet (SKU, Item Name, QTY columns), so HQ availability can exclude
+    stock that's held back and can't be pulled for stores."""
+    client = get_google_client()
+    spreadsheet = client.open_by_key(RESERVED_STOCK_SHEET_ID)
+    worksheet = spreadsheet.sheet1
+    data = worksheet.get_all_records(value_render_option='UNFORMATTED_VALUE')
+    df = pd.DataFrame(data)
+    df.columns = df.columns.str.strip()
+    df['SKU'] = df['SKU'].apply(clean_id)
+    df['QTY'] = pd.to_numeric(df['QTY'], errors='coerce').fillna(0)
+
+    return df.groupby('SKU')['QTY'].sum().to_dict()
