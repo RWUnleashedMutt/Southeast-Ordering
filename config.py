@@ -3,6 +3,11 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
+# Sheet listing SKU / Item Name / QTY held back for other events — that
+# stock stays in physical inventory but must be excluded from what HQ can
+# transfer to stores.
+RESERVED_STOCK_SHEET_ID = '1AnuBtn2viv1-ES_FDdW7q8bLVczFsO99sN33_WAL8yg'
+
 SHEET_IDS = {
     'HQ Min/Max Orders': '1W-AGqIXwcqL7clDHad43hFmpPrrXzNUDYC4-dVGpngo',
     '2 Hounds': '1zT3zsX2eFPLRk430Q-c5QmWsXJHDSej97EI_ivl-q0A',

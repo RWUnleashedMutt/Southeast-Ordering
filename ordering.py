@@ -18,7 +18,7 @@ def compute_store_order(store_code, df_master, rules_matrix, hq_col,
     })
 
     extra_cols = ['SKU', 'GTIN', 'Item Name',
-                  'Default Unit Cost', long_name, hq_col]
+                  'Default Unit Cost', long_name, hq_col, 'Reserved_Qty']
     available_cols = [c for c in extra_cols if c in df_master.columns]
     store_inv = df_master[available_cols].copy().rename(
         columns={long_name: 'Current_Inv', hq_col: 'HQ_Qty'}
@@ -29,7 +29,8 @@ def compute_store_order(store_code, df_master, rules_matrix, hq_col,
     data = pd.merge(store_inv, store_rules, on='SKU', how='left')
     data = data.fillna({
         'DNO': 0, 'Order In Quantities': 1, 'Min': 0,
-        'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0
+        'Max': 0, 'Current_Inv': 0, 'HQ_Qty': 0, 'Default Unit Cost': 0,
+        'Reserved_Qty': 0
     })
     data['DNO'] = data['DNO'].astype(bool)
     data['Has_Rules_Match'] = has_rules_match.values

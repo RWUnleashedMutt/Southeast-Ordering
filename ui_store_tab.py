@@ -21,10 +21,13 @@ def render_store_tab(short_name, long_name, data, selected_vendor, date_str, hq_
     # HQ Transfer UI
     st.subheader(f"🚛 HQ Transfer List: {short_name}")
     st.caption(
-        f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). Delete a row or set Qty to 0 to move it to the Vendor Order.")
+        f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). "
+        f"HQ Qty excludes stock reserved for other events (shown separately). "
+        f"Delete a row or set Qty to 0 to move it to the Vendor Order.")
 
     hq_display = data[data['Suggested_HQ_Qty'] > 0][[
-        'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv', 'HQ_Qty'
+        'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv',
+        'HQ_Qty', 'Reserved_Qty'
     ]].copy()
     hq_display.rename(
         columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
