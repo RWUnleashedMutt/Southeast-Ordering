@@ -2,28 +2,18 @@ import io
 import streamlit as st
 import pandas as pd
 
-from config import inv_store_map
-from ordering import compute_store_order
 
-
-def render_consolidated_summary(df_master, rules_matrix, hq_col, hq_threshold, selected_stores,
-                                allocation_candidates, hq_allocations, date_str, selected_vendor):
+def render_consolidated_summary(store_data, date_str, selected_vendor):
+    """`store_data` is {short_name: compute_store_order(...) result},
+    already computed once per store by the caller — reused here instead
+    of recomputing every store's order data from scratch a second time."""
     st.divider()
     st.subheader("📊 Consolidated Order Summary")
     st.caption("Total items being ordered across all stores (vendor + HQ)")
 
     all_orders = []
 
-    for short_name in selected_stores:
-        long_name = inv_store_map[short_name]
-        if long_name not in df_master.columns:
-            continue
-
-        data = compute_store_order(
-            short_name, df_master, rules_matrix, hq_col,
-            hq_threshold, allocation_candidates, hq_allocations
-        )
-
+    for short_name, data in store_data.items():
         order_items = data[data['Total_Units_Needed'] > 0][[
             'SKU', 'GTIN', 'Item Name', 'Order In Quantities',
             'Vendor_Cases', 'Suggested_HQ_Qty', 'Default Unit Cost'
