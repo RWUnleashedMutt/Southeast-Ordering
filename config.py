@@ -9,7 +9,7 @@ SCOPES = [
 RESERVED_STOCK_SHEET_ID = '1AnuBtn2viv1-ES_FDdW7q8bLVczFsO99sN33_WAL8yg'
 
 SHEET_IDS = {
-    'HQ Min/Max Orders': '1W-AGqIXwcqL7clDHad43hFmpPrrXzNUDYC4-dVGpngo',
+
     '2 Hounds': '1zT3zsX2eFPLRk430Q-c5QmWsXJHDSej97EI_ivl-q0A',
     'Adored Beast': '1HwOxpAzI_HlntVVfOqxBVAWDy7cznPxxhUqOR5cy6ng',
     'Ark Naturals': '1hgs38gm96v_ZansdVJTdr4JEsK-6TTarlbuBIr2V9C0',
@@ -58,6 +58,7 @@ SHEET_IDS = {
     'Trueblue': '1vvMahz0JVn-_mO_Dry5amhebKbc_T_hAzVJYarP8o-U',
     'Tuesdays Natural Dog': '1f_iWF48FflsFBlVkR3P5Sk49Q87Q8Fpl8tklKYKsHtk',
     'Unique': '1Cf40Nm57h2gm_le_0gOV-jHfSpHjJHb6F8-0wP1cA0s',
+    'Vee': '14EZfYWVlwub2L_lruqK6ijPbUoAAoaPueVt-GoR4EAs',
     'WPO': '1ySBJWhHh9_F_kAD3tvNZNA9ZuPLOAx3xfX_MwqOYCOA',
     'Wild Meadow Farms': '1NOkBS71fYQSOtIs_cwWMGmn0WDJK8YfO51GVyVxaMEg',
     'Winnie Lou': '1sFhwEVHFhAZI9mgVLCy1EFUR3He76ZrJFEJP1BiH2gQ',

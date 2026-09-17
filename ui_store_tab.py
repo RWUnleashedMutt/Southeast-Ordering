@@ -7,7 +7,7 @@ from config import inv_store_map
 
 
 @st.fragment
-def render_store_tab(short_name, long_name, data, selected_vendor, date_str, hq_threshold):
+def render_store_tab(short_name, long_name, data, date_str, hq_threshold):
     """
     Renders the HQ Transfer + Vendor Order UI for one store tab.
     Wrapped in @st.fragment so editing a data_editor or clicking a
@@ -22,12 +22,12 @@ def render_store_tab(short_name, long_name, data, selected_vendor, date_str, hq_
     st.subheader(f"🚛 HQ Transfer List: {short_name}")
     st.caption(
         f"Items with HQ Stock > {hq_threshold} are suggested here (or your allocation above). "
-        f"HQ Qty excludes stock reserved for other events (shown separately). "
+        f"HQ Qty excludes stock reserved for other events. "
         f"Delete a row or set Qty to 0 to move it to the Vendor Order.")
 
     hq_display = data[data['Suggested_HQ_Qty'] > 0][[
         'SKU', 'GTIN', 'Item Name', 'Suggested_HQ_Qty', 'Current_Inv',
-        'HQ_Qty', 'Reserved_Qty'
+        'HQ_Qty', 'Max'
     ]].copy()
     hq_display.rename(
         columns={'Suggested_HQ_Qty': 'Transfer_Qty'}, inplace=True)
@@ -114,7 +114,7 @@ def render_store_tab(short_name, long_name, data, selected_vendor, date_str, hq_
             worksheet.set_column('D:F', 14)
 
         st.download_button(f"📥 Download HQ Transfer", buf_hq.getvalue(),
-                           file_name=f"{short_name}_{date_str}_HQ_{selected_vendor}.xlsx",
+                           file_name=f"{short_name}_{date_str}_HQ_MinMax_Order.xlsx",
                            key=f"dl_hq_{short_name}")
 
     st.divider()

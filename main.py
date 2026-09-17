@@ -1,4 +1,7 @@
+import time
+
 import streamlit as st
+import pandas as pd
 from datetime import datetime
 
 from catalog import load_catalog
@@ -15,8 +18,9 @@ from config import inv_store_map
 def init_session_defaults():
     """Initialize all session state defaults upfront."""
     defaults = {
-        "rules_vendor": None,
+        "rules_vendors": None,
         "rules_matrix": None,
+        "rules_dupe_skus": None,
         "hq_allocations": {},
         "current_tab": 0,
         "allocations_submitted": False,
@@ -32,26 +36,68 @@ init_session_defaults()
 
 st.title("📦 Southeast Inventory & Ordering")
 
-catalog_file, selected_vendor, load_rules_btn, selected_stores, hq_threshold = render_sidebar()
+catalog_file, selected_vendors, load_rules_btn, selected_stores, hq_threshold = render_sidebar()
 
 # --- LOAD RULES FROM SHEETS ---
 rules_matrix = None
+vendor_label = "+".join(selected_vendors)
 
-if selected_vendor == "-- Select a Vendor --":
-    st.sidebar.info("Please select a vendor to load rules.")
+if not selected_vendors:
+    st.sidebar.info("Please select at least one vendor to load rules.")
 elif load_rules_btn:
-    load_rules_from_sheets.clear()
-    with st.spinner(f"Loading rules matrix for **{selected_vendor}** from Google Sheets..."):
-        try:
-            rules_matrix = load_rules_from_sheets(selected_vendor)
-            st.session_state["rules_matrix"] = rules_matrix
-            st.session_state["rules_vendor"] = selected_vendor
-            st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
-        except Exception as e:
-            st.sidebar.error(f"❌ Failed to load rules: {e}")
-elif st.session_state.get("rules_matrix") is not None and st.session_state.get("rules_vendor") == selected_vendor:
+    vendor_frames = []
+    with st.spinner(f"Loading rules matrices for {len(selected_vendors)} vendor(s) from Google Sheets..."):
+        for i, vendor in enumerate(selected_vendors):
+            # Bust only this vendor's cache entry (not every vendor's) so
+            # re-clicking Load doesn't re-fetch already-cached vendors —
+            # that blanket-clearing was compounding the Sheets API quota
+            # errors when many vendors were selected at once.
+            load_rules_from_sheets.clear(vendor)
+            try:
+                vendor_df = load_rules_from_sheets(vendor).copy()
+                vendor_df['__vendor__'] = vendor
+                vendor_frames.append(vendor_df)
+                st.sidebar.success(f"✅ {vendor}: {len(vendor_df)} SKUs")
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to load rules for {vendor}: {e}")
+
+            # Pace requests so a large multi-vendor (or "Select All") load
+            # doesn't burst past Google's per-minute read quota. Each vendor
+            # now costs a single Sheets API read; ~1.5s/vendor keeps
+            # sustained throughput well under the ~60 reads/min cap, with
+            # headroom for other concurrent app usage sharing the same quota.
+            if i < len(selected_vendors) - 1:
+                time.sleep(1.5)
+
+    if vendor_frames:
+        combined = pd.concat(vendor_frames, ignore_index=True)
+        dupe_mask = combined['SKU'].duplicated(keep=False)
+        dupe_skus = None
+        if dupe_mask.any():
+            dupe_cols = [c for c in ['SKU', 'Item Name'] if c in combined.columns]
+            dupe_skus = combined.loc[dupe_mask, dupe_cols + ['__vendor__']].groupby(
+                dupe_cols, as_index=False
+            )['__vendor__'].agg(lambda v: ', '.join(v)).rename(
+                columns={'__vendor__': 'Vendors (first wins)'}
+            )
+            st.sidebar.warning(
+                f"⚠️ {len(dupe_skus)} SKU(s) appear under more than one selected "
+                f"vendor — keeping the first-selected vendor's rules for those."
+            )
+        rules_matrix = combined.drop(
+            columns='__vendor__').drop_duplicates(subset='SKU', keep='first')
+        st.session_state["rules_matrix"] = rules_matrix
+        st.session_state["rules_vendors"] = selected_vendors
+        st.session_state["rules_dupe_skus"] = dupe_skus
+elif st.session_state.get("rules_matrix") is not None and st.session_state.get("rules_vendors") == selected_vendors:
     rules_matrix = st.session_state["rules_matrix"]
-    st.sidebar.success(f"✅ Rules loaded: {len(rules_matrix)} SKUs")
+    st.sidebar.success(
+        f"✅ Rules loaded: {len(rules_matrix)} SKUs across {len(selected_vendors)} vendor(s)")
+
+dupe_skus = st.session_state.get("rules_dupe_skus")
+if dupe_skus is not None and not dupe_skus.empty:
+    with st.expander(f"⚠️ {len(dupe_skus)} SKU(s) duplicated across selected vendors", expanded=False):
+        st.dataframe(dupe_skus, hide_index=True, width="stretch")
 
 # --- MAIN APP ---
 if catalog_file and rules_matrix is not None and selected_stores:
@@ -118,6 +164,11 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
     tabs = st.tabs(selected_stores)
 
+    # Computed once per store here and reused for the consolidated summary
+    # below instead of letting it recompute compute_store_order from
+    # scratch for every store a second time on every rerun.
+    store_data = {}
+
     for i, short_name in enumerate(selected_stores):
         long_name = inv_store_map[short_name]
         with tabs[i]:
@@ -127,18 +178,15 @@ if catalog_file and rules_matrix is not None and selected_stores:
                     hq_threshold, allocation_candidates,
                     st.session_state.get("hq_allocations", {})
                 )
+                store_data[short_name] = data
 
                 render_store_tab(short_name, long_name, data,
-                                 selected_vendor, date_str, hq_threshold)
+                                 date_str, hq_threshold)
 
             else:
                 st.error(f"Missing column '{long_name}' in Catalog.")
 
-    render_consolidated_summary(
-        df_master, rules_matrix, available_hq_col, hq_threshold, selected_stores,
-        allocation_candidates, st.session_state.get("hq_allocations", {}),
-        date_str, selected_vendor
-    )
+    render_consolidated_summary(store_data, date_str, vendor_label)
 
 elif not selected_stores:
     st.warning(
@@ -165,4 +213,4 @@ elif not catalog_file:
             st.warning("Reference image not found.")
 elif rules_matrix is None:
     st.warning(
-        "⚠️ Please select a vendor and click 'Load Rules from Google Sheets' to continue.")
+        "⚠️ Please select vendor(s) and click 'Load Rules from Google Sheets' to continue.")
