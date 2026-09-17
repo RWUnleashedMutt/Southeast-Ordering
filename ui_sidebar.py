@@ -32,8 +32,20 @@ def render_sidebar():
             1 for v in SHEET_IDS.keys()
             if st.session_state.get(f"vendor_chk_{v}")
         )
+
+        # st.expander has no `key` on the Streamlit version this app is
+        # pinned to, so its own open/closed state can't persist across the
+        # reruns each checkbox click causes. Track it ourselves instead —
+        # expanded= is then driven by our own session_state, not the
+        # expander's (nonexistent) built-in state.
+        st.session_state.setdefault("vendor_list_open", False)
+        toggle_label = ("▲ Hide vendor list" if st.session_state["vendor_list_open"]
+                        else "▼ Show vendor list")
+        if st.button(toggle_label, key="vendor_list_toggle"):
+            st.session_state["vendor_list_open"] = not st.session_state["vendor_list_open"]
+
         with st.expander(f"Vendors ({selected_count} selected)",
-                         expanded=False, key="vendor_expander"):
+                         expanded=st.session_state["vendor_list_open"]):
             selected_vendors = [
                 vendor for vendor in SHEET_IDS.keys()
                 if st.checkbox(vendor, key=f"vendor_chk_{vendor}")
