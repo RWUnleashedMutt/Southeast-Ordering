@@ -70,10 +70,18 @@ def render_sidebar():
         st.checkbox("Select All Stores", key="store_select_all",
                     on_change=_apply_select_all_stores)
 
+        # Seed each checkbox's initial value once via session_state instead
+        # of passing value= on every render — passing both value= and a key
+        # that's also written to directly (by the select-all callback above)
+        # is what triggers Streamlit's "widget created with a default value
+        # but also had its value set via the Session State API" warning.
+        for store in store_map.values():
+            st.session_state.setdefault(
+                f"store_chk_{store}", store in priority_stores)
+
         selected_stores = [
             store for store in store_map.values()
-            if st.checkbox(store, value=(store in priority_stores),
-                           key=f"store_chk_{store}")
+            if st.checkbox(store, key=f"store_chk_{store}")
         ]
 
         st.divider()
