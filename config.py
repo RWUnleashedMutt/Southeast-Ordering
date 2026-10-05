@@ -9,7 +9,6 @@ SCOPES = [
 RESERVED_STOCK_SHEET_ID = '1AnuBtn2viv1-ES_FDdW7q8bLVczFsO99sN33_WAL8yg'
 
 SHEET_IDS = {
-
     '2 Hounds': '1zT3zsX2eFPLRk430Q-c5QmWsXJHDSej97EI_ivl-q0A',
     'Adored Beast': '1HwOxpAzI_HlntVVfOqxBVAWDy7cznPxxhUqOR5cy6ng',
     'Ark Naturals': '1hgs38gm96v_ZansdVJTdr4JEsK-6TTarlbuBIr2V9C0',
@@ -56,6 +55,7 @@ SHEET_IDS = {
     'Polka Dog': '1JUFN_ErS6FXUKD9gv_RzccxJplwpEDiaX3Am4LW0shw',
     'QT Dog': '1__-S-g-FdiuwKFyTZYq7fCJTwN3irMqHfvF99hrMhLY',
     'RC Pets': '1ep49U5csk0eLIYu6otnhGZ7BbtPLD6KRG1wMytlhOa8',
+    'Rabbit Tap': '18AJj0C71Wu85g2iF0T5sE7bdJsX0uQKcyMMWD70HiR4',
     'Ruff Dawg': '1HpXiQn4RsNbdG0DtCKu9xjQ_W9Q9qa0DrDaFZiTroIw',
     'Ruffwear': '1MiiuAI7pqjKwhwi_MsiINBUOpvc_uq7OrGJ8BSln2xg',
     'SE': '1O6HWGeLgtdScnJ0_pQc8asaSj3-L4pP9vjCvvXa26vQ',
