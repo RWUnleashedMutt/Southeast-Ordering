@@ -62,6 +62,7 @@ SHEET_IDS = {
     'Thunderworks': '1LkgDBEhGpiI1kAQUjzAO33woL7ltKeZou7Qz5acEX3U',
     'Trueblue': '1vvMahz0JVn-_mO_Dry5amhebKbc_T_hAzVJYarP8o-U',
     'Tuesdays Natural Dog': '1f_iWF48FflsFBlVkR3P5Sk49Q87Q8Fpl8tklKYKsHtk',
+    'Tuft & Paw': '1WNtvfToJmIiW8eHFgHBphkc6cJMJcF64IXCjAuyPqtM',
     'Unique': '1Cf40Nm57h2gm_le_0gOV-jHfSpHjJHb6F8-0wP1cA0s',
     'Vee': '14EZfYWVlwub2L_lruqK6ijPbUoAAoaPueVt-GoR4EAs',
     'WPO': '1ySBJWhHh9_F_kAD3tvNZNA9ZuPLOAx3xfX_MwqOYCOA',
