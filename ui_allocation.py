@@ -1,5 +1,18 @@
+import copy
+
 import streamlit as st
 import pandas as pd
+
+
+def reset_allocations():
+    """Clear all HQ allocation state: the live inputs, the pushed snapshot
+    that the store tabs use, and the per-input widget values (which would
+    otherwise bring the old numbers straight back on the next render)."""
+    st.session_state["hq_allocations"] = {}
+    st.session_state["applied_allocations"] = {}
+    st.session_state["allocations_submitted"] = False
+    for key in [k for k in st.session_state.keys() if str(k).startswith("alloc_")]:
+        del st.session_state[key]
 
 
 def render_allocation_section(df_master, allocation_candidates, selected_stores):
@@ -45,7 +58,8 @@ def render_allocation_section(df_master, allocation_candidates, selected_stores)
     st.write("**Allocate HQ Qty by Store:**")
     st.info(
         "👆 \"Remaining\" updates live as you type. Once everything looks "
-        "right, click **Push Allocations** to apply it to the store tabs below.")
+        "right, click **Push Allocations** to apply it to the store tabs below. "
+        "Changes made after pushing only take effect when you push again.")
 
     render_allocation_inputs(df_master, allocation_candidates, selected_stores)
 
@@ -167,6 +181,10 @@ def render_allocation_inputs(df_master, allocation_candidates, selected_stores):
                 f"{', '.join(over_allocated_skus)}. Reduce quantities before pushing."
             )
         else:
+            # Snapshot what was pushed: only this snapshot feeds the store tabs,
+            # so half-typed or over-allocated inputs never leak into them.
+            st.session_state.applied_allocations = copy.deepcopy(
+                st.session_state.hq_allocations)
             st.session_state.allocations_submitted = True
             st.rerun()
 
@@ -182,7 +200,7 @@ def _render_allocation_summary(allocation_candidates, selected_stores):
         info = allocation_candidates[sku]
         hq_available = int(info['hq_qty'])
         allocated_by_store = {
-            store_code: st.session_state.hq_allocations.get(
+            store_code: st.session_state.get("applied_allocations", {}).get(
                 sku, {}).get(store_code, 0)
             for store_code in selected_stores
             if store_code in info['stores']

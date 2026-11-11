@@ -6,9 +6,10 @@ from datetime import datetime
 
 from catalog import load_catalog
 from google_sheets import load_rules_from_sheets, load_reserved_stock
-from ordering import compute_store_order, get_allocation_candidates
+from ordering import (compute_store_needs, apply_hq_suggestions,
+                      get_allocation_candidates, missing_rule_columns)
 from ui_sidebar import render_sidebar
-from ui_allocation import render_allocation_section
+from ui_allocation import render_allocation_section, reset_allocations
 from ui_store_tab import render_store_tab
 from ui_summary import render_consolidated_summary
 from config import inv_store_map
@@ -22,11 +23,30 @@ def init_session_defaults():
         "rules_matrix": None,
         "rules_dupe_skus": None,
         "hq_allocations": {},
+        "applied_allocations": {},
+        "alloc_signature": None,
+        "store_vendor_edits": {},
         "current_tab": 0,
         "allocations_submitted": False,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+
+
+def _today_str():
+    """Date for export filenames, in the stores' time zone (the server may
+    run in UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def _vendor_label(vendors):
+    """Short vendor label for filenames ("Select All" would otherwise join
+    ~60 names into a filename that is too long to save)."""
+    return "+".join(vendors) if len(vendors) <= 3 else f"{len(vendors)}_vendors"
 
 
 # --- APP ---
@@ -40,12 +60,15 @@ catalog_file, selected_vendors, load_rules_btn, selected_stores, hq_threshold = 
 
 # --- LOAD RULES FROM SHEETS ---
 rules_matrix = None
-vendor_label = "+".join(selected_vendors)
+vendor_label = _vendor_label(selected_vendors)
 
 if not selected_vendors:
     st.sidebar.info("Please select at least one vendor to load rules.")
 elif load_rules_btn:
     vendor_frames = []
+    # The reserved-for-events sheet is cached too; refresh it with the rules
+    # so a reservation added this morning is not missed for up to an hour.
+    load_reserved_stock.clear()
     with st.spinner(f"Loading rules matrices for {len(selected_vendors)} vendor(s) from Google Sheets..."):
         for i, vendor in enumerate(selected_vendors):
             # Bust only this vendor's cache entry (not every vendor's) so
@@ -103,6 +126,16 @@ if dupe_skus is not None and not dupe_skus.empty:
 if catalog_file and rules_matrix is not None and selected_stores:
     df_master = load_catalog(catalog_file)
 
+    # Allocations belong to one specific catalog / threshold / store set. If
+    # any of them changes, the old allocations no longer describe reality.
+    catalog_id = getattr(catalog_file, "file_id", None) or (
+        catalog_file.name, catalog_file.size)
+    alloc_signature = (catalog_id, hq_threshold, tuple(selected_stores))
+    if st.session_state.get("alloc_signature") != alloc_signature:
+        if st.session_state.get("alloc_signature") is not None:
+            reset_allocations()
+        st.session_state["alloc_signature"] = alloc_signature
+
     catalog_skus = set(df_master['SKU'].unique())
     rules_matrix = rules_matrix[rules_matrix['SKU'].isin(catalog_skus)].copy()
 
@@ -113,7 +146,7 @@ if catalog_file and rules_matrix is not None and selected_stores:
         st.stop()
 
     hq_col = 'Current Quantity HQ'
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _today_str()
 
     if hq_col not in df_master.columns:
         st.error(f"❌ Missing column: '{hq_col}'")
@@ -122,9 +155,14 @@ if catalog_file and rules_matrix is not None and selected_stores:
     try:
         reserved_map = load_reserved_stock()
     except Exception as e:
-        st.warning(
-            f"⚠️ Could not load reserved-stock sheet — reserved-for-events "
-            f"stock will NOT be excluded from HQ availability this run: {e}")
+        st.error(
+            f"❌ Could not load the reserved-stock sheet: {e}\n\n"
+            f"Without it, stock reserved for other events is NOT excluded, so "
+            f"HQ transfers may over-commit HQ inventory.")
+        if not st.checkbox(
+                "Continue anyway without reserved-stock data",
+                key="allow_no_reserved"):
+            st.stop()
         reserved_map = {}
 
     df_master['Reserved_Qty'] = df_master['SKU'].map(
@@ -147,41 +185,59 @@ if catalog_file and rules_matrix is not None and selected_stores:
         # Server-console diagnostics only — never let an encoding quirk in
         # Item Name text (or the terminal's own encoding) crash the app.
         try:
+            name_by_sku = dict(zip(df_master['SKU'], df_master['Item Name']))
             print(f"\nWARNING: {len(unmatched_skus)} Unmatched SKUs found:")
             for sku in unmatched_list:
-                item_name = df_master[df_master['SKU'] == sku]['Item Name'].iloc[0] if len(
-                    df_master[df_master['SKU'] == sku]) > 0 else "Unknown"
-                print(f"  - {sku}: {item_name}")
+                print(f"  - {sku}: {name_by_sku.get(sku, 'Unknown')}")
             print(f"\nTotal unmatched: {len(unmatched_skus)}\n")
         except UnicodeEncodeError:
             print(f"\nWARNING: {len(unmatched_skus)} unmatched SKUs found (names omitted — non-ASCII console).")
 
+    # A store whose columns are missing from the rules sheet would silently
+    # never order; say so instead.
+    missing_cols = missing_rule_columns(rules_matrix, selected_stores)
+    for store_code, cols in missing_cols.items():
+        st.warning(
+            f"⚠️ {store_code}: the rules matrix has no {', '.join(cols)} "
+            f"column(s), so no items will be ordered for this store.")
+
+    # Each store's needs are computed once per run, then reused for the
+    # allocation scan and for the per-store tabs.
+    base_data = {
+        store_code: compute_store_needs(
+            store_code, df_master, rules_matrix, available_hq_col)
+        for store_code in selected_stores
+        if inv_store_map[store_code] in df_master.columns
+    }
+
     allocation_candidates = get_allocation_candidates(
-        df_master, rules_matrix, available_hq_col, selected_stores, hq_threshold
+        df_master, rules_matrix, available_hq_col, selected_stores,
+        hq_threshold, base_data=base_data
     )
 
     render_allocation_section(df_master, allocation_candidates, selected_stores)
 
     tabs = st.tabs(selected_stores)
 
-    # Computed once per store here and reused for the consolidated summary
-    # below instead of letting it recompute compute_store_order from
-    # scratch for every store a second time on every rerun.
+    # Only allocations the user has pushed are applied to the store tabs.
+    applied_allocations = (
+        st.session_state.get("applied_allocations", {})
+        if st.session_state.get("allocations_submitted") else {})
+
+    # Kept for the consolidated summary below.
     store_data = {}
 
     for i, short_name in enumerate(selected_stores):
         long_name = inv_store_map[short_name]
         with tabs[i]:
             if long_name in df_master.columns:
-                data = compute_store_order(
-                    short_name, df_master, rules_matrix, available_hq_col,
-                    hq_threshold, allocation_candidates,
-                    st.session_state.get("hq_allocations", {})
+                data = apply_hq_suggestions(
+                    base_data[short_name], short_name, hq_threshold,
+                    allocation_candidates, applied_allocations
                 )
                 store_data[short_name] = data
 
-                render_store_tab(short_name, long_name, data,
-                                 date_str, hq_threshold)
+                render_store_tab(short_name, data, date_str, hq_threshold)
 
             else:
                 st.error(f"Missing column '{long_name}' in Catalog.")
@@ -209,7 +265,7 @@ elif not catalog_file:
         try:
             st.image("./assets/Export Example.png",
                      width="stretch", caption="Select the 'Filtered' option.")
-        except:
+        except Exception:
             st.warning("Reference image not found.")
 elif rules_matrix is None:
     st.warning(

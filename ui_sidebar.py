@@ -1,6 +1,7 @@
 import streamlit as st
 
 from config import SHEET_IDS, store_map, priority_stores
+from ui_allocation import reset_allocations
 
 
 def render_sidebar():
@@ -71,8 +72,7 @@ def render_sidebar():
         if sorted(selected_vendors) != sorted(st.session_state.get("rules_vendors") or []):
             st.session_state.rules_matrix = None
             st.session_state.rules_vendors = None
-            st.session_state.hq_allocations = {}
-            st.session_state.allocations_submitted = False
+            reset_allocations()
 
         load_rules_btn = st.button("📥 Load Rules from Google Sheets")
 

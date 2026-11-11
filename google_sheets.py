@@ -76,6 +76,8 @@ def load_rules_from_sheets(vendor: str) -> pd.DataFrame:
     df = _fetch_first_sheet(client, SHEET_IDS[vendor])
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
+    # Blank-SKU rows (spacer rows, half-filled lines) must never act as a rule.
+    df = df[df['SKU'] != ""].reset_index(drop=True)
 
     for col in df.columns:
         if col == 'SKU':
@@ -102,6 +104,7 @@ def load_reserved_stock() -> dict:
     df = _fetch_first_sheet(client, RESERVED_STOCK_SHEET_ID)
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
+    df = df[df["SKU"] != ""].copy()
     df['QTY'] = pd.to_numeric(df['QTY'], errors='coerce').fillna(0)
 
     return df.groupby('SKU')['QTY'].sum().to_dict()

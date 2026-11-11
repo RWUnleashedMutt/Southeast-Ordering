@@ -3,9 +3,30 @@ import numpy as np
 
 from config import inv_store_map
 
+# Defaults used when a vendor's rules sheet has no column for a store
+# (new store, renamed header, ...). Max=0 / Min=0 means "never triggers an
+# order", so a missing column fails safe instead of crashing the page.
+_RULE_DEFAULTS = {'DNO': False, 'Min': 0, 'Max': 0}
 
-def compute_store_order(store_code, df_master, rules_matrix, hq_col,
-                        hq_threshold, allocation_candidates, hq_allocations):
+
+def missing_rule_columns(rules_matrix, store_codes):
+    """Return {store_code: [missing column names]} for stores whose
+    `{store}_DNO / _Min / _Max` columns are absent from the rules matrix,
+    so the UI can warn about them instead of silently never ordering."""
+    missing = {}
+    for store_code in store_codes:
+        cols = [f'{store_code}_{suffix}' for suffix in ('DNO', 'Min', 'Max')]
+        absent = [c for c in cols if c not in rules_matrix.columns]
+        if absent:
+            missing[store_code] = absent
+    return missing
+
+
+def compute_store_needs(store_code, df_master, rules_matrix, hq_col):
+    """Step 1: what does this store need, before any HQ transfer or
+    allocation is considered? Independent of hq_threshold, allocations and
+    allocation candidates, so it can be computed once per store per run and
+    shared by get_allocation_candidates() and apply_hq_suggestions()."""
     long_name = inv_store_map[store_code]
 
     lookup_cols = ['SKU', 'Order In Quantities',
@@ -16,6 +37,9 @@ def compute_store_order(store_code, df_master, rules_matrix, hq_col,
         f'{store_code}_Min': 'Min',
         f'{store_code}_Max': 'Max'
     })
+    for col, default in _RULE_DEFAULTS.items():
+        if col not in store_rules.columns:
+            store_rules[col] = default
 
     extra_cols = ['SKU', 'GTIN', 'Item Name',
                   'Default Unit Cost', long_name, hq_col, 'Reserved_Qty']
@@ -66,10 +90,21 @@ def compute_store_order(store_code, df_master, rules_matrix, hq_col,
         data['Total_Units_Needed'] + data['Order In Quantities'],
         data['Total_Units_Needed']
     )
+    return data
 
-    data['Allocated_HQ'] = data['SKU'].apply(
-        lambda sku: hq_allocations.get(sku, {}).get(store_code, 0)
-    )
+
+def apply_hq_suggestions(base_data, store_code, hq_threshold,
+                         allocation_candidates, hq_allocations):
+    """Step 2: split each need between an HQ transfer and a vendor order,
+    using the user's pushed allocations and the HQ threshold. Returns a new
+    frame; `base_data` is not modified."""
+    data = base_data.copy()
+
+    alloc_map = {
+        sku: per_store.get(store_code, 0)
+        for sku, per_store in hq_allocations.items()
+    }
+    data['Allocated_HQ'] = data['SKU'].map(alloc_map).fillna(0)
     data['Is_Allocation_Candidate'] = data['SKU'].isin(
         allocation_candidates.keys())
 
@@ -90,14 +125,26 @@ def compute_store_order(store_code, df_master, rules_matrix, hq_col,
     data['Vendor_Cases'] = np.ceil(
         data['Vendor_Units'] / data['Order In Quantities']
     )
-
+    # What is actually ordered: whole cases. This (not Vendor_Units, which
+    # can be a partial case) is what cost must be based on.
+    data['Order_Units'] = data['Vendor_Cases'] * data['Order In Quantities']
     return data
 
 
+def compute_store_order(store_code, df_master, rules_matrix, hq_col,
+                        hq_threshold, allocation_candidates, hq_allocations):
+    base = compute_store_needs(store_code, df_master, rules_matrix, hq_col)
+    return apply_hq_suggestions(
+        base, store_code, hq_threshold, allocation_candidates, hq_allocations)
+
+
 def get_allocation_candidates(df_master, rules_matrix, hq_col,
-                              selected_stores, hq_threshold):
+                              selected_stores, hq_threshold, base_data=None):
     """Find SKUs where combined store demand exceeds HQ stock, so the UI
-    can ask the user how to split limited HQ inventory across stores."""
+    can ask the user how to split limited HQ inventory across stores.
+
+    `base_data` ({store_code: compute_store_needs() result}) can be passed
+    in to avoid recomputing each store's needs."""
     store_needs_list = []
 
     for store_code in selected_stores:
@@ -105,10 +152,11 @@ def get_allocation_candidates(df_master, rules_matrix, hq_col,
         if long_name not in df_master.columns:
             continue
 
-        data = compute_store_order(
-            store_code, df_master, rules_matrix, hq_col,
-            hq_threshold, allocation_candidates={}, hq_allocations={}
-        )
+        if base_data is not None and store_code in base_data:
+            data = base_data[store_code]
+        else:
+            data = compute_store_needs(
+                store_code, df_master, rules_matrix, hq_col)
         needs = data[data['Total_Units_Needed'] > 0][
             ['SKU', 'Total_Units_Needed', 'Current_Inv',
                 'HQ_Qty', 'Order In Quantities']
@@ -153,3 +201,41 @@ def get_allocation_candidates(df_master, rules_matrix, hq_col,
         }
 
     return allocation_candidates
+
+
+def vendor_order_frame(data):
+    """Default vendor-order lines for one store, straight from the computed
+    data (no manual edits). Columns: SKU, GTIN, Item Name, Case Pack, Cases,
+    Unit Cost, Order Units. Used as the fallback for the consolidated
+    summary and as the base for the editable vendor tables."""
+    lines = data[data['Order_Units'] > 0]
+    return pd.DataFrame({
+        'SKU': lines['SKU'],
+        'GTIN': lines['GTIN'] if 'GTIN' in lines.columns else '',
+        'Item Name': lines['Item Name'],
+        'Case Pack': lines['Order In Quantities'],
+        'Cases': lines['Vendor_Cases'],
+        'Unit Cost': lines['Default Unit Cost'],
+        'Order Units': lines['Order_Units'],
+    }).reset_index(drop=True)
+
+
+def consolidate_vendor_orders(order_frames):
+    """Combine per-store vendor-order frames (see vendor_order_frame) into
+    one order per SKU: units summed across stores, cost from whole cases."""
+    frames = [f for f in order_frames if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=[
+            'SKU', 'GTIN', 'Item Name', 'Case Pack',
+            'Order Units', 'Unit Cost', 'Total Cost'])
+    combined = pd.concat(frames, ignore_index=True)
+    summary = combined.groupby('SKU', as_index=False).agg({
+        'GTIN': 'first',
+        'Item Name': 'first',
+        'Case Pack': 'first',
+        'Order Units': 'sum',
+        'Unit Cost': 'first',
+    })
+    summary = summary[summary['Order Units'] > 0].copy()
+    summary['Total Cost'] = summary['Order Units'] * summary['Unit Cost']
+    return summary.reset_index(drop=True)

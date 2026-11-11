@@ -4,10 +4,29 @@ import numpy as np
 import pandas as pd
 
 from config import inv_store_map
+from ordering import vendor_order_frame
+
+# Session-state key holding each store tab's latest *edited* vendor order
+# lines, so the consolidated summary can reflect what will really be ordered.
+STORE_EDITS_KEY = "store_vendor_edits"
+
+
+def _num(series, default=0):
+    return pd.to_numeric(series, errors='coerce').fillna(default)
+
+
+def _record_vendor_edits(short_name, frames):
+    """Remember this store's final (edited) vendor-order lines."""
+    cols = ['SKU', 'GTIN', 'Item Name', 'Case Pack', 'Cases',
+            'Unit Cost', 'Order Units']
+    non_empty = [f for f in frames if f is not None and not f.empty]
+    result = (pd.concat(non_empty, ignore_index=True)[cols]
+              if non_empty else pd.DataFrame(columns=cols))
+    st.session_state.setdefault(STORE_EDITS_KEY, {})[short_name] = result
 
 
 @st.fragment
-def render_store_tab(short_name, long_name, data, date_str, hq_threshold):
+def render_store_tab(short_name, data, date_str, hq_threshold):
     """
     Renders the HQ Transfer + Vendor Order UI for one store tab.
     Wrapped in @st.fragment so editing a data_editor or clicking a
@@ -36,16 +55,23 @@ def render_store_tab(short_name, long_name, data, date_str, hq_threshold):
                            hide_index=True, num_rows="dynamic", key=f"hq_ed_{short_name}")
 
     ed_hq = ed_hq[ed_hq['SKU'].notna()].copy()
+    # A blank/invalid quantity (e.g. a freshly added row) counts as 0 and
+    # negatives are ignored, rather than silently poisoning the math below.
+    ed_hq['Transfer_Qty'] = _num(ed_hq['Transfer_Qty']).clip(lower=0)
 
     if not ed_hq.empty:
         ed_hq_with_cost = ed_hq.merge(
-            data[['SKU', 'Default Unit Cost']], on='SKU', how='left'
+            data[['SKU', 'Default Unit Cost']].drop_duplicates('SKU'),
+            on='SKU', how='left'
         )
         hq_cost = (
             ed_hq_with_cost['Transfer_Qty'] * ed_hq_with_cost['Default Unit Cost']).sum()
         st.metric("🏭 HQ Transfer Cost", f"${hq_cost:,.2f}")
 
-    hq_final_map = ed_hq.set_index('SKU')['Transfer_Qty'].to_dict()
+    # If the same SKU appears twice (a row was duplicated), sum the quantities.
+    hq_final_map = ed_hq.groupby('SKU')['Transfer_Qty'].sum().to_dict()
+    # Local copy: the frame passed in belongs to the caller's full run.
+    data = data.copy()
     data['Final_HQ_Qty'] = data['SKU'].map(
         lambda x: hq_final_map.get(x, 0))
     data['Vendor_Units'] = (
@@ -53,6 +79,7 @@ def render_store_tab(short_name, long_name, data, date_str, hq_threshold):
     data['Vendor_Cases'] = np.ceil(
         data['Vendor_Units'] / data['Order In Quantities']
     )
+    data['Order_Units'] = data['Vendor_Cases'] * data['Order In Quantities']
 
     if not ed_hq.empty:
         st.metric("Total Transfer Units",
@@ -120,40 +147,63 @@ def render_store_tab(short_name, long_name, data, date_str, hq_threshold):
     st.divider()
 
     # 5. Vendor Order UI
-    st.subheader(f"🛒 Vendor Orders: {short_name}")
-    order_summary = data[data['Vendor_Units'] > 0][[
-        'SKU', 'GTIN', 'Item Name', 'Vendor_Cases', 'Order In Quantities',
-        'Vendor_Units', 'Current_Inv', 'Max', 'Default Unit Cost'
-    ]].copy().reset_index(drop=True)
-    order_summary.rename(columns={
-        'Vendor_Cases': 'Order (Cases)',
-        'Order In Quantities': 'Case Pack',
-        'Vendor_Units': 'Total Units'
-    }, inplace=True)
+    # Cost and units are always derived from WHOLE CASES (cases x case pack),
+    # because that is what is actually ordered. They are recomputed from the
+    # edited "Order (Cases)" column, so changing cases updates cost/units.
+    lines = vendor_order_frame(data)
+    order_summary = lines[[
+        'SKU', 'GTIN', 'Item Name', 'Cases', 'Case Pack', 'Unit Cost'
+    ]].rename(columns={'Cases': 'Order (Cases)'})
+
+    edited_frames = []
 
     if not order_summary.empty:
         frozen_mask = order_summary['Item Name'].str.startswith(
             'FRZN', na=False)
 
         for label, file_label, df_type in [
-            ("📦 Dry Order", "Dry", order_summary[~frozen_mask]),
+            ("📦 Dry Order", "Dry",
+             order_summary[~frozen_mask].reset_index(drop=True)),
             ("❄️ Frozen Order", "Frozen",
-             order_summary[frozen_mask])
+             order_summary[frozen_mask].reset_index(drop=True))
         ]:
             st.markdown(f"#### {label}")
             if not df_type.empty:
-                ed_df = st.data_editor(df_type, width="stretch",
-                                       hide_index=True, num_rows="dynamic",
-                                       key=f"vend_{label}_{short_name}")
+                ed_df = st.data_editor(
+                    df_type, width="stretch",
+                    hide_index=True, num_rows="dynamic",
+                    # Only the case count is meant to be edited; the rest
+                    # are reference columns (delete a row to drop an item).
+                    disabled=['SKU', 'GTIN', 'Item Name',
+                              'Case Pack', 'Unit Cost'],
+                    key=f"vend_{label}_{short_name}")
 
                 ed_df = ed_df[ed_df['SKU'].notna()].copy()
+                ed_df['Order (Cases)'] = _num(
+                    ed_df['Order (Cases)']).clip(lower=0).round()
+                ed_df['Case Pack'] = _num(ed_df['Case Pack'], 1).clip(lower=1)
+                ed_df['Unit Cost'] = _num(ed_df['Unit Cost'])
+                ed_df = ed_df[ed_df['Order (Cases)'] > 0]
                 if ed_df.empty:
                     st.write("No items in this category.")
                     continue
 
-                cost = (ed_df['Total Units'] *
-                        ed_df['Default Unit Cost']).sum()
-                st.metric(f"{label} Cost", f"${cost:,.2f}")
+                ed_df['Total Units'] = ed_df['Order (Cases)'] * \
+                    ed_df['Case Pack']
+                cost = (ed_df['Total Units'] * ed_df['Unit Cost']).sum()
+                c1, c2 = st.columns(2)
+                c1.metric(f"{label} Units", f"{int(ed_df['Total Units'].sum())}")
+                c2.metric(f"{label} Cost", f"${cost:,.2f}")
+
+                edited_frames.append(pd.DataFrame({
+                    'SKU': ed_df['SKU'],
+                    'GTIN': ed_df['GTIN'],
+                    'Item Name': ed_df['Item Name'],
+                    'Case Pack': ed_df['Case Pack'],
+                    'Cases': ed_df['Order (Cases)'],
+                    'Unit Cost': ed_df['Unit Cost'],
+                    'Order Units': ed_df['Total Units'],
+                }))
 
                 export_df = ed_df[[
                     'GTIN', 'Item Name', 'Order (Cases)', 'Case Pack']].copy()
@@ -184,3 +234,5 @@ def render_store_tab(short_name, long_name, data, date_str, hq_threshold):
     else:
         st.success(
             "No vendor order needed (Items may be covered by HQ).")
+
+    _record_vendor_edits(short_name, edited_frames)

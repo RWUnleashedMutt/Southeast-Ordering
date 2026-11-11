@@ -5,7 +5,9 @@ import streamlit as st
 def clean_id(val):
     if pd.isna(val):
         return ""
-    return str(int(val)) if isinstance(val, float) and val.is_integer() else str(val)
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
+    return str(val).strip()
 
 
 @st.cache_data
@@ -14,6 +16,10 @@ def load_catalog(file) -> pd.DataFrame:
     df = pd.read_excel(file, header=1, dtype=dtype_dict)
     df.columns = df.columns.str.strip()
     df['SKU'] = df['SKU'].apply(clean_id)
+    # Items with no SKU can't be matched to a rule or ordered. Dropping them
+    # here stops them all collapsing onto the same "" key (and matching a
+    # stray blank-SKU row in a rules sheet).
+    df = df[df['SKU'] != ""].reset_index(drop=True)
     if 'GTIN' in df.columns:
         df['GTIN'] = df['GTIN'].astype(str).str.strip()
 
