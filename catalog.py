@@ -1,6 +1,8 @@
 import pandas as pd
 import streamlit as st
 
+from component_stock import COMPONENT_SHEET, inherit_component_stock
+
 
 def clean_id(val):
     if pd.isna(val):
@@ -13,8 +15,15 @@ def clean_id(val):
 @st.cache_data
 def load_catalog(file) -> pd.DataFrame:
     dtype_dict = {'GTIN': str, 'SKU': str}
-    df = pd.read_excel(file, header=1, dtype=dtype_dict)
+    xl = pd.ExcelFile(file)
+    df = xl.parse(0, header=1, dtype=dtype_dict)
     df.columns = df.columns.str.strip()
+
+    # Pack variations (e.g. "8PK") are stocked by a base item and show blank
+    # quantities in Square; give them the base item's stock and cost.
+    if COMPONENT_SHEET in xl.sheet_names:
+        df = inherit_component_stock(
+            df, xl.parse(COMPONENT_SHEET, header=1, dtype=str))
     df['SKU'] = df['SKU'].apply(clean_id)
     # Items with no SKU can't be matched to a rule or ordered. Dropping them
     # here stops them all collapsing onto the same "" key (and matching a

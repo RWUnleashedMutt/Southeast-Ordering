@@ -181,6 +181,13 @@ if catalog_file and rules_matrix is not None and selected_stores:
 
     st.caption(f"✅ Matched {matched} of {total} catalog SKUs to rules.")
 
+    if 'Stock Source SKU' in df_master.columns:
+        n_stock_by = int((df_master['Stock Source SKU'] != '').sum())
+        if n_stock_by:
+            st.caption(
+                f"ℹ️ {n_stock_by} pack variations (e.g. 8PK) are stocked by a "
+                f"base item, so they use that item's quantities and unit cost.")
+
     if unmatched_skus:
         # Server-console diagnostics only — never let an encoding quirk in
         # Item Name text (or the terminal's own encoding) crash the app.

@@ -18,6 +18,7 @@ A Streamlit app that generates per-store and vendor purchase orders for Southeas
 | `main.py` | App entry point: loads inputs, wires the pieces together |
 | `ordering.py` | Pure ordering logic (needs, HQ split, allocation conflicts, consolidation) — no Streamlit |
 | `catalog.py` | Square catalog loader |
+| `component_stock.py` | Gives pack variations their base item's stock/cost (Square stock-by items) |
 | `google_sheets.py` | Rules Matrix and reserved-stock loaders |
 | `ui_sidebar.py`, `ui_allocation.py`, `ui_store_tab.py`, `ui_summary.py` | Streamlit UI sections |
 | `config.py` | Sheet IDs and store maps |
@@ -82,6 +83,7 @@ For each store/SKU combination:
 - Vendor orders are always whole cases. **Units and cost are computed from cases × case pack**, so a partial case left after an HQ transfer is costed as the full case, and editing `Order (Cases)` in a store tab updates the units and cost shown.
 - If a vendor's rules sheet is missing a store's `_DNO` / `_Min` / `_Max` columns, nothing is ordered for that store and a warning is shown.
 - Rows with a blank SKU (in the catalog, the rules sheets or the reserved sheet) are ignored.
+- **Pack variations stocked by a base item** (e.g. FRZN Smalls "8PK" / "6 Pack"): Square leaves their quantities and unit cost blank and keeps the stock on the base item. The catalog's `Component Inventory` sheet says which base item stocks which variation, and the app copies that base item's quantities and unit cost onto the variation (1:1 — Min/Max/Order In Quantities are in the base item's units). The rules matrix rows on the variation then work normally. Real values on a variation are never overwritten; a note under the "Matched" line shows how many variations were handled this way.
 
 ### HQ allocation conflicts
 Before per-store tabs are shown, the app scans for SKUs where total demand across selected stores exceeds available HQ stock (and HQ stock is above threshold). For each such SKU, the user allocates HQ quantity across the stores that need it via number inputs; unallocated demand automatically reverts to a vendor order for that store.

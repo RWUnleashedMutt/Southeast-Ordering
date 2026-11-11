@@ -11,6 +11,8 @@
 - Failure to load the reserved-stock sheet now stops the app unless explicitly overridden, and the Load button refreshes that sheet too.
 - Blank or invalid quantities in the editable tables no longer crash the Excel export or silently drop items.
 
+- Pack variations stocked by a base item (Square "stock-by" / Component Inventory, e.g. FRZN Smalls 8PK) are no longer treated as 0 in stock with $0 cost. They now use their base item's quantities and unit cost, which removes phantom orders.
+
 ### Changed
 - `ordering.py` split into `compute_store_needs` + `apply_hq_suggestions` (needs are computed once per store per run instead of twice); `compute_store_order` still composes them.
 - Consolidated filename uses `N_vendors` when more than 3 vendors are selected; the date uses America/New_York.
